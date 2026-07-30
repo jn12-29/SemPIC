@@ -1,0 +1,61 @@
+{
+    "output_dir": "./generation_cache/artifacts/qwen_3_8b_teacher/biography_greedy_kl_1024",
+    "data_configs": [
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 2,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 3,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 1,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 5,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 2,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 7,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 3,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

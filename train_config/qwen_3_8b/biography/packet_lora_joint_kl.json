@@ -1,0 +1,18 @@
+{
+    "forward_batch_size": 8,
+    "output_dir": "./train_outputs/qwen_3_8b/biography/joint",
+    "train": {
+        "targets": ["lora", "packet_wrapper"]
+    },
+    "lora": {
+        "enabled": true,
+        "rank": 8,
+        "alpha": 16,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+    },
+    "packet_wrapper": {
+        "enabled": true,
+        "header_len": 8,
+        "trailer_len": 8
+    }
+}

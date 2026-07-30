@@ -1,0 +1,24 @@
+{
+    "model": {
+        "generation_kwargs": {
+            "max_new_tokens": 128
+        }
+    },
+    "output_dir": "./generation_cache/artifacts/llama_3_1_8b_teacher/niah_chunk4096_greedy128_kl",
+    "gen_batch_size": 1,
+    "data_configs": [
+        {
+            "dataset_name": "niah",
+            "num_samples": 512,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "8192",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "chunk_size": 4096
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

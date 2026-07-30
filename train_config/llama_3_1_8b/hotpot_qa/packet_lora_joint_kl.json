@@ -1,0 +1,25 @@
+{
+    "output_dir": "./train_outputs/llama_3_1_8b/hotpot_qa/joint",
+    "lora": {
+        "enabled": true,
+        "rank": 8,
+        "alpha": 16,
+        "target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj"
+        ]
+    },
+    "packet_wrapper": {
+        "enabled": true,
+        "header_len": 8,
+        "trailer_len": 8
+    },
+    "train": {
+        "targets": [
+            "lora",
+            "packet_wrapper"
+        ]
+    }
+}

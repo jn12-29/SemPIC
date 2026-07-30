@@ -1,0 +1,13 @@
+{
+    "forward_batch_size": 8,
+    "output_dir": "./train_outputs/qwen_3_8b/biography/sempic",
+    "train": {
+        "targets": ["lora"]
+    },
+    "lora": {
+        "enabled": true,
+        "rank": 8,
+        "alpha": 16,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+    }
+}

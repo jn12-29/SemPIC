@@ -1,0 +1,120 @@
+{
+    "batch_size": 16,
+    "gen_batch_size": 64,
+    "forward_batch_size": 8,
+    "total_epoch": 5,
+    "kv_gradient_checkpointing": true,
+    "model": {
+        "model_path": "Qwen/Qwen3-4B-Instruct-2507",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "generation_kwargs": {
+            "max_new_tokens": 64,
+            "do_sample": false,
+            "use_cache": true
+        }
+    },
+    "cache_device": "cpu",
+    "cache_path": "./generation_cache/artifacts/qwen_3_4b_teacher/biography_greedy_kl_1024",
+    "seed": 42,
+    "loss": {
+        "type": "kl",
+        "tau": 1.0
+    },
+    "lora": {
+        "enabled": false,
+        "rank": 8,
+        "alpha": 16,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "adapter_name": "default",
+        "init_path": null
+    },
+    "packet_wrapper": {
+        "enabled": false,
+        "header_len": 8,
+        "trailer_len": 8,
+        "dtype": null,
+        "init_path": null
+    },
+    "optimizers": {
+        "lora": {
+            "opt_config": {
+                "lr": 5e-4,
+                "weight_decay": 0.0
+            },
+            "scheduler_config": {
+                "start_factor": 1.0,
+                "end_factor": 0.0
+            }
+        },
+        "packet_wrapper": {
+            "opt_config": {
+                "lr": 5e-4,
+                "weight_decay": 0.0
+            },
+            "scheduler_config": {
+                "start_factor": 1.0,
+                "end_factor": 0.0
+            }
+        }
+    },
+    "data_configs": [
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 2,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 3,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 1,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 5,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 2,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 7,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 3,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

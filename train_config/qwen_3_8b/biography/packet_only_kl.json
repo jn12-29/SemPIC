@@ -1,0 +1,12 @@
+{
+    "forward_batch_size": 8,
+    "output_dir": "./train_outputs/qwen_3_8b/biography/kvpacket",
+    "train": {
+        "targets": ["packet_wrapper"]
+    },
+    "packet_wrapper": {
+        "enabled": true,
+        "header_len": 8,
+        "trailer_len": 8
+    }
+}

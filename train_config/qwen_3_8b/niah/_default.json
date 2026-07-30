@@ -1,0 +1,82 @@
+{
+    "total_epoch": 5,
+    "gen_batch_size": 1,
+    "batch_size": 16,
+    "forward_batch_size": 1,
+    "kv_gradient_checkpointing": true,
+    "model": {
+        "model_path": "Qwen/Qwen3-8B",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "generation_kwargs": {
+            "max_new_tokens": 128,
+            "do_sample": false,
+            "use_cache": true
+        }
+    },
+    "cache_device": "cpu",
+    "cache_path": "./generation_cache/artifacts/qwen_3_8b_teacher/niah_chunk4096_greedy128_kl_2048",
+    "seed": 42,
+    "loss": {
+        "type": "kl",
+        "tau": 1
+    },
+    "lora": {
+        "enabled": false,
+        "rank": 8,
+        "alpha": 16,
+        "dropout": 0,
+        "target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj"
+        ],
+        "adapter_name": "default",
+        "init_path": null
+    },
+    "packet_wrapper": {
+        "enabled": false,
+        "header_len": 8,
+        "trailer_len": 8,
+        "dtype": null,
+        "init_path": null
+    },
+    "optimizers": {
+        "lora": {
+            "opt_config": {
+                "lr": 0.0005,
+                "weight_decay": 0
+            },
+            "scheduler_config": {
+                "start_factor": 1,
+                "end_factor": 0
+            }
+        },
+        "packet_wrapper": {
+            "opt_config": {
+                "lr": 0.0005,
+                "weight_decay": 0
+            },
+            "scheduler_config": {
+                "start_factor": 1,
+                "end_factor": 0
+            }
+        }
+    },
+    "data_configs": [
+        {
+            "dataset_name": "niah",
+            "num_samples": 2048,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "8192",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "chunk_size": 4096
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

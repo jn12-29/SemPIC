@@ -1,0 +1,14 @@
+{
+    "output_dir": "./train_outputs/qwen_3_8b/niah/kvpacket",
+    "kv_gradient_checkpointing": true,
+    "packet_wrapper": {
+        "enabled": true,
+        "header_len": 8,
+        "trailer_len": 8
+    },
+    "train": {
+        "targets": [
+            "packet_wrapper"
+        ]
+    }
+}

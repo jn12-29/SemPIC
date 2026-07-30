@@ -1,0 +1,17 @@
+{
+    "model": {
+        "model_path": "meta-llama/Llama-3.1-8B-Instruct",
+        "tokenizer_path": "meta-llama/Llama-3.1-8B-Instruct",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "generation_kwargs": {
+            "max_new_tokens": 64,
+            "do_sample": false,
+            "use_cache": true
+        }
+    },
+    "store_logits": true,
+    "gen_batch_size": 8,
+    "cache_device": "cpu",
+    "seed": 42
+}

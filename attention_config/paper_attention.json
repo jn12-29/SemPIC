@@ -1,0 +1,20 @@
+{
+    "schema_version": 2,
+    "query_passes": [
+        {
+            "query_pass_id": "terminal_query",
+            "kind": "terminal_inline_tokens",
+            "reducers": ["attention_profile", "pic_retrieval"]
+        },
+        {
+            "query_pass_id": "gold_answer",
+            "kind": "gold_answer_literal_tokens",
+            "reducers": ["attention_profile", "pic_retrieval"]
+        },
+        {
+            "query_pass_id": "shifted_prediction",
+            "kind": "gold_answer_shifted_prediction_queries",
+            "reducers": ["attention_profile", "pic_retrieval"]
+        }
+    ]
+}

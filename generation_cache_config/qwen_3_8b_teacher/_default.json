@@ -1,0 +1,17 @@
+{
+    "model": {
+        "model_path": "Qwen/Qwen3-8B",
+        "tokenizer_path": "Qwen/Qwen3-8B",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "generation_kwargs": {
+            "max_new_tokens": 64,
+            "do_sample": false,
+            "use_cache": true
+        }
+    },
+    "store_logits": true,
+    "gen_batch_size": 8,
+    "cache_device": "cpu",
+    "seed": 42
+}

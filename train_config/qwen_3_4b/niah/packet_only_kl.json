@@ -1,0 +1,13 @@
+{
+    "output_dir": "./train_outputs/qwen_3_4b/niah/kvpacket",
+    "packet_wrapper": {
+        "enabled": true,
+        "header_len": 8,
+        "trailer_len": 8
+    },
+    "train": {
+        "targets": [
+            "packet_wrapper"
+        ]
+    }
+}

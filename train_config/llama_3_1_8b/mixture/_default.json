@@ -1,0 +1,172 @@
+{
+    "total_epoch": 5,
+    "gen_batch_size": 1,
+    "batch_size": 16,
+    "forward_batch_size": 1,
+    "kv_gradient_checkpointing": true,
+    "use_cache": false,
+    "model": {
+        "model_path": "meta-llama/Llama-3.1-8B-Instruct",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "generation_kwargs": {
+            "max_new_tokens": 512,
+            "do_sample": false,
+            "use_cache": true
+        }
+    },
+    "cache_device": "cpu",
+    "cache_path": [
+        "./generation_cache/artifacts/llama_3_1_8b_teacher/biography_greedy_kl_1024",
+        "./generation_cache/artifacts/llama_3_1_8b_teacher/hotpot_qa_greedy512_kl_2048",
+        "./generation_cache/artifacts/llama_3_1_8b_teacher/musique_greedy512_kl_2048",
+        "./generation_cache/artifacts/llama_3_1_8b_teacher/niah_chunk4096_greedy128_kl_2048"
+    ],
+    "seed": 42,
+    "loss": {
+        "type": "kl",
+        "tau": 1
+    },
+    "lora": {
+        "enabled": false,
+        "rank": 8,
+        "alpha": 16,
+        "dropout": 0,
+        "target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj"
+        ],
+        "adapter_name": "default",
+        "init_path": null
+    },
+    "packet_wrapper": {
+        "enabled": false,
+        "header_len": 8,
+        "trailer_len": 8,
+        "dtype": "float32",
+        "init_path": null
+    },
+    "optimizers": {
+        "lora": {
+            "opt_config": {
+                "lr": 0.0005,
+                "weight_decay": 0
+            },
+            "scheduler_config": {
+                "start_factor": 1,
+                "end_factor": 0
+            }
+        },
+        "packet_wrapper": {
+            "opt_config": {
+                "lr": 0.0005,
+                "weight_decay": 0
+            },
+            "scheduler_config": {
+                "start_factor": 1,
+                "end_factor": 0
+            }
+        }
+    },
+    "data_configs": [
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 2,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 3,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 1,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 5,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 2,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "biography",
+            "num_samples": 256,
+            "num_data_strs": 7,
+            "num_shots": 0,
+            "subset": "10k",
+            "split": "train",
+            "seed": 3,
+            "data_kwargs": {
+                "question_type": "QA",
+                "cache_dataset": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "niah",
+            "num_samples": 2048,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "8192",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "chunk_size": 4096
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "musique",
+            "num_samples": 2048,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "default",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "add_inst": true,
+                "add_cot": true
+            },
+            "template": "tokenizer_chat"
+        },
+        {
+            "dataset_name": "hotpot_qa",
+            "num_samples": 2048,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "fullwiki",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "add_inst": true,
+                "add_cot": true
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

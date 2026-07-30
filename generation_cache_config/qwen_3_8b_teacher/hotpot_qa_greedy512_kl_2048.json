@@ -1,0 +1,24 @@
+{
+    "model": {
+        "generation_kwargs": {
+            "max_new_tokens": 512
+        }
+    },
+    "output_dir": "./generation_cache/artifacts/qwen_3_8b_teacher/hotpot_qa_greedy512_kl_2048",
+    "data_configs": [
+        {
+            "dataset_name": "hotpot_qa",
+            "num_samples": 2048,
+            "num_data_strs": 0,
+            "num_shots": 0,
+            "subset": "fullwiki",
+            "split": "train",
+            "seed": 0,
+            "data_kwargs": {
+                "add_inst": true,
+                "add_cot": true
+            },
+            "template": "tokenizer_chat"
+        }
+    ]
+}

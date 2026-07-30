@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sempic"
+version = "0.1.0"
+description = "Train and evaluate reusable document KV-cache adapters for multi-document RAG"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "transformers",
+    "safetensors",
+    "accelerate",
+    "datasets",
+    "kvpress",
+    "optimum",
+    "optimum-quanto",
+    "peft",
+    "alive-progress",
+    "rich",
+    "nltk",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "plotly",
+    "streamlit",
+    "dowhen",
+    "socksio",
+    "nvitop>=1.7.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sempic*"]
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]

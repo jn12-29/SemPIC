@@ -1,0 +1,10 @@
+{
+    "schema_version": 2,
+    "query_passes": [
+        {
+            "query_pass_id": "shifted_prediction",
+            "kind": "gold_answer_shifted_prediction_queries",
+            "reducers": ["attention_profile", "pic_retrieval"]
+        }
+    ]
+}
