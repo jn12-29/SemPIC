@@ -233,9 +233,21 @@ The project Streamlit configuration binds the service to `127.0.0.1` by default 
 
 ## Paper
 
-*SemPIC: Learning Semantic Position-Independent KV Caches*
+[**SemPIC: Learning Semantic Position-Independent KV Caches**](https://arxiv.org/abs/2607.28069)
 
-The SemPIC paper is not yet publicly available.
+If you use this repository, please cite SemPIC:
+
+```bibtex
+@misc{xie2026sempic,
+  title={SemPIC: Learning Semantic Position-Independent KV Caches},
+  author={Hui Xie and Peng Xiao and Yutong Deng and Shuoran Dou and Jian Yang and Jinyang Guo},
+  year={2026},
+  eprint={2607.28069},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  url={https://arxiv.org/abs/2607.28069}
+}
+```
 
 ## Acknowledgements
 
