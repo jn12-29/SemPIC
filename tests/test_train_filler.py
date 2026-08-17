@@ -161,25 +161,20 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_train_config(config)
 
-    def test_batched_cuda_attention_warns_and_uses_sdpa(self):
-        with (
-            mock.patch(
-                "sempic.utils.train.get_model_device",
-                return_value=torch.device("cuda:0"),
-            ),
-            self.assertLogs("sempic.utils.train", level="WARNING") as logs,
+    def test_cuda_attention_runtime_has_no_microbatch_size_fallback(self):
+        with mock.patch(
+            "sempic.utils.train.get_model_device",
+            return_value=torch.device("cuda:0"),
         ):
-            runtime = create_train_attention_runtime(object(), 2)
+            runtime = create_train_attention_runtime(object())
 
-        self.assertEqual(runtime.backend, "sdpa")
-        self.assertTrue(runtime.verified)
-        self.assertTrue(any("falling back to SDPA" in message for message in logs.output))
+        self.assertEqual(runtime.backend, "flex")
+        self.assertFalse(runtime.verified)
 
     def test_explicit_sdpa_attention_does_not_probe_device(self):
         with mock.patch("sempic.utils.train.get_model_device") as get_device:
             runtime = create_train_attention_runtime(
                 object(),
-                1,
                 attention_backend="sdpa",
             )
 
@@ -218,7 +213,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
             return loss, 1, [float(loss.detach())]
 
         with (
-            mock.patch("sempic.utils.train.probe_train_flex_attention_shapes") as shape_probe,
             mock.patch("sempic.utils.train.batched_student_loss", side_effect=fake_loss),
             self.assertLogs("sempic.utils.train", level="WARNING") as logs,
         ):
@@ -237,7 +231,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                 attention_runtime=runtime,
             )
 
-        shape_probe.assert_called_once()
         self.assertEqual(backends, ["flex", "sdpa", "sdpa"])
         self.assertEqual(runtime.backend, "sdpa")
         self.assertTrue(runtime.verified)
@@ -246,33 +239,30 @@ class UnifiedTrainConfigTests(unittest.TestCase):
             1,
         )
 
-    def test_flex_shape_probe_failure_falls_back_to_sdpa(self):
+    def test_flex_preflight_uses_the_first_batched_microbatch(self):
         model = TinyTrainModel()
         optimizer = torch.optim.SGD([model.lora_weight], lr=0.1)
         scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1.0, end_factor=1.0
         )
         runtime = TrainAttentionRuntime(backend="flex", verified=False)
-        backends = []
+        samples = [make_sample(), make_sample()]
+        probed_batch_sizes = []
 
         def fake_loss(**kwargs):
-            backends.append(kwargs["attention_backend"])
+            microbatch_size = len(kwargs["samples"])
+            probed_batch_sizes.append(microbatch_size)
             loss = model.lora_weight.sum()
-            return loss, 1, [float(loss.detach())]
+            return loss, microbatch_size, [float(loss.detach())] * microbatch_size
 
-        with (
-            mock.patch(
-                "sempic.utils.train.probe_train_flex_attention_shapes",
-                side_effect=RuntimeError("unsupported shape"),
-            ),
-            mock.patch("sempic.utils.train.batched_student_loss", side_effect=fake_loss),
-            self.assertLogs("sempic.utils.train", level="WARNING") as logs,
+        with mock.patch(
+            "sempic.utils.train.batched_student_loss", side_effect=fake_loss
         ):
             train_components(
-                samples=[make_sample()],  # type: ignore[arg-type]
+                samples=samples,  # type: ignore[arg-type]
                 model=model,
-                batch_size=1,
-                forward_batch_size=1,
+                batch_size=2,
+                forward_batch_size=2,
                 optimizers={"lora": optimizer},
                 schedulers={"lora": scheduler},
                 generation_cache=GenerationCache(),
@@ -283,10 +273,9 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                 attention_runtime=runtime,
             )
 
-        self.assertEqual(backends, ["sdpa", "sdpa"])
-        self.assertEqual(runtime.backend, "sdpa")
+        self.assertEqual(probed_batch_sizes, [2, 2])
+        self.assertEqual(runtime.backend, "flex")
         self.assertTrue(runtime.verified)
-        self.assertTrue(any("unsupported shape" in message for message in logs.output))
 
     def test_train_config_defaults_targets_and_runtime_defaults(self):
         train_config = load_train_config(build_train_config_dict())

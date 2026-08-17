@@ -8,8 +8,8 @@
 | --- | --- | --- | --- |
 | `total_epoch` | int | yes | Number of training epochs. |
 | `batch_size` | int | yes | Number of samples per optimizer step. All target optimizers step on this same boundary. |
-| `forward_batch_size` | int | no | Number of samples processed together by one student forward/backward microbatch. Defaults to `1`; must divide `batch_size`. CUDA training with one teacher target per sample uses dense FlexAttention at `1`; larger values, multiple teacher targets, or a failed Flex preflight use the SDPA fallback and emit a warning. |
-| `attention_backend` | string | no | Training attention preference: `auto` (default) or `flex` selects FlexAttention when supported and falls back to SDPA with a warning; `sdpa` selects SDPA directly. `run_train.py --attention-backend` overrides this field. |
+| `forward_batch_size` | int | no | Number of samples processed together by one student forward/backward microbatch. Defaults to `1`; must divide `batch_size`. SDPA and FlexAttention support larger ragged microbatches subject to available GPU memory. |
+| `attention_backend` | string | no | Training attention preference: `auto` (default) or `flex` tries FlexAttention on CUDA and falls back to SDPA only if its integrated loss/backward preflight fails; `sdpa` selects SDPA directly. `run_train.py --attention-backend` overrides this field. |
 | `gen_batch_size` | int | yes | Batch size for fallback online teacher generation when `cache_path` is null. |
 | `model` | dict | yes | Base causal LM configuration. |
 | `cache_device` | str | no | Backing device for configured artifacts or online cache tensors. Configured artifacts require `"cpu"`; online generation defaults to `"cuda:0"`. |

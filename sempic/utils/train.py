@@ -39,7 +39,6 @@ from .run_storage import validate_run_suffix
 from .student_prefill import (
     TrainAttentionBackend,
     batched_student_loss,
-    probe_train_flex_attention_shapes,
 )
 
 
@@ -59,7 +58,6 @@ class TrainAttentionRuntime:
 
 def create_train_attention_runtime(
     model: Any,
-    forward_batch_size: int,
     attention_backend: TrainAttentionPreference = "auto",
 ) -> TrainAttentionRuntime:
     if attention_backend == "sdpa":
@@ -71,13 +69,6 @@ def create_train_attention_runtime(
                 "Train FlexAttention requires CUDA; falling back to SDPA on %s.",
                 device,
             )
-        return TrainAttentionRuntime(backend="sdpa", verified=True)
-    if forward_batch_size != 1:
-        LOGGER.warning(
-            "Train FlexAttention currently requires forward_batch_size=1; "
-            "falling back to SDPA for forward_batch_size=%d.",
-            forward_batch_size,
-        )
         return TrainAttentionRuntime(backend="sdpa", verified=True)
     return TrainAttentionRuntime(backend="flex", verified=False)
 
@@ -667,8 +658,7 @@ def _format_duration(seconds: float) -> str:
 def _verify_train_attention_backend(
     runtime: TrainAttentionRuntime,
     *,
-    samples: list[TrainSample],
-    first_sample: TrainSample,
+    probe_samples: list[TrainSample],
     model: Any,
     optimizers: dict[TrainTarget, torch.optim.Optimizer],
     generation_cache: GenerationCacheAccess,
@@ -695,7 +685,7 @@ def _verify_train_attention_backend(
 
     def probe(backend: TrainAttentionBackend) -> None:
         loss, _, _ = batched_student_loss(
-            samples=[first_sample],
+            samples=probe_samples,
             model=model,
             generation_cache=generation_cache,
             loss_config=loss_config,
@@ -710,12 +700,6 @@ def _verify_train_attention_backend(
             torch.cuda.synchronize(device)
 
     try:
-        probe_train_flex_attention_shapes(
-            samples,
-            model,
-            generation_cache,
-            packet_wrapper,
-        )
         probe("flex")
     except Exception as flex_error:
         flex_error_summary = f"{type(flex_error).__name__}: {flex_error}"
@@ -798,10 +782,10 @@ def train_components(
     total_optimizer_steps = (len(epoch_indices) + batch_size - 1) // batch_size
 
     if attention_runtime is not None and epoch_indices:
+        probe_indices = epoch_indices[:forward_batch_size]
         _verify_train_attention_backend(
             attention_runtime,
-            samples=samples,
-            first_sample=samples[epoch_indices[0]],
+            probe_samples=[samples[index] for index in probe_indices],
             model=model,
             optimizers=optimizers,
             generation_cache=generation_cache,

@@ -45,6 +45,8 @@ def _dense_train_flex_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     frontiers: torch.Tensor,
+    query_lengths: torch.Tensor,
+    kv_lengths: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
     def score_mod(
@@ -55,8 +57,13 @@ def _dense_train_flex_attention(
         key_index: torch.Tensor,
     ) -> torch.Tensor:
         del head_index
+        valid = (
+            (query_index < query_lengths[batch_index])
+            & (key_index < kv_lengths[batch_index])
+            & (key_index <= frontiers[batch_index, query_index])
+        )
         return torch.where(
-            key_index <= frontiers[batch_index, query_index],
+            valid,
             score,
             torch.full_like(score, -torch.inf),
         )
@@ -78,127 +85,6 @@ _COMPILED_DENSE_TRAIN_FLEX_ATTENTION = torch.compile(
 )
 
 
-def _collect_train_flex_attention_shapes(
-    samples: Sequence[Mapping[str, Any]],
-    generation_cache: GenerationCacheAccess,
-    packet_wrapper: PacketWrapper | None,
-    device: torch.device,
-) -> tuple[tuple[int, int], ...]:
-    wrapper_tokens = (
-        packet_wrapper.header_len + packet_wrapper.trailer_len
-        if packet_wrapper is not None
-        else 0
-    )
-    shapes: list[tuple[int, int]] = []
-    seen_shapes: set[tuple[int, int]] = set()
-    for sample in samples:
-        prompt = sample["prompt"]
-        if not isinstance(prompt, TokenizedPrompt):
-            raise TypeError("Each training sample must contain a TokenizedPrompt.")
-        metadata_method = getattr(generation_cache, "metadata", None)
-        metadata = (
-            metadata_method(sample["semantic_key"])
-            if callable(metadata_method)
-            else None
-        )
-        if metadata is not None:
-            sequence_lengths = metadata.sequence_lengths
-            teacher_sequence = torch.zeros(
-                sequence_lengths[0] if sequence_lengths else 0,
-                dtype=torch.long,
-                device=device,
-            )
-        else:
-            generation = generation_cache.get(sample["semantic_key"])
-            if generation is None or not generation["sequences"]:
-                raise KeyError(
-                    "Missing teacher generation cache entry during FlexAttention probe."
-                )
-            sequence_lengths = tuple(
-                sequence.numel() for sequence in generation["sequences"]
-            )
-            teacher_sequence = generation["sequences"][0].to(device)
-        if len(sequence_lengths) != 1:
-            raise ValueError(
-                "Train FlexAttention currently requires one teacher sequence per sample."
-            )
-        context_lengths = {
-            (0, part_index): span.end - span.start + wrapper_tokens
-            for part_index, span in enumerate(prompt.parts)
-            if span.kind == "context"
-        }
-        layout = build_student_layout(
-            [prompt],
-            [teacher_sequence],
-            context_lengths,
-            device,
-        )
-        shape = (layout.input_ids.size(1), layout.physical_valid.size(1))
-        if shape not in seen_shapes:
-            seen_shapes.add(shape)
-            shapes.append(shape)
-    return tuple(shapes)
-
-
-def probe_train_flex_attention_shapes(
-    samples: Sequence[Mapping[str, Any]],
-    model: Any,
-    generation_cache: GenerationCacheAccess,
-    packet_wrapper: PacketWrapper | None,
-) -> None:
-    device = get_model_device(model)
-    if device.type != "cuda":
-        return
-    causal_lm = _unwrap_causal_lm(model)
-    config = causal_lm.config
-    query_heads = int(config.num_attention_heads)
-    kv_heads = int(config.num_key_value_heads)
-    head_dim = int(getattr(config, "head_dim", config.hidden_size // query_heads))
-    dtype = next(causal_lm.parameters()).dtype
-    scale = float(causal_lm.model.layers[0].self_attn.scaling)
-    shapes = _collect_train_flex_attention_shapes(
-        samples,
-        generation_cache,
-        packet_wrapper,
-        device,
-    )
-    for query_length, key_length in shapes:
-        frontiers = torch.full(
-            (1, query_length),
-            key_length - 1,
-            dtype=torch.long,
-            device=device,
-        )
-        query = torch.empty_strided(
-            (1, query_heads, query_length, head_dim),
-            (
-                query_length * query_heads * head_dim,
-                head_dim,
-                query_heads * head_dim,
-                1,
-            ),
-            dtype=dtype,
-            device=device,
-        ).zero_().requires_grad_()
-        key = torch.zeros(
-            (1, kv_heads, key_length, head_dim),
-            dtype=dtype,
-            device=device,
-            requires_grad=True,
-        )
-        value = torch.zeros_like(key, requires_grad=True)
-        output = _COMPILED_DENSE_TRAIN_FLEX_ATTENTION(
-            query,
-            key,
-            value,
-            frontiers,
-            scale,
-        )
-        torch.autograd.grad(output.sum(), (query, key, value))
-
-    torch.cuda.synchronize(device)
-
-
 @dataclass(frozen=True, slots=True)
 class ContextWorkItem:
     sample_index: int
@@ -217,6 +103,8 @@ class StudentBatchLayout:
     physical_position_ids: torch.Tensor
     physical_source_indices: torch.Tensor
     query_frontiers: torch.Tensor
+    query_lengths: tuple[int, ...]
+    kv_lengths: tuple[int, ...]
     target_rows: tuple[torch.Tensor, ...]
     context_placements: tuple[tuple[ContextPlacement, ...], ...]
     interleaved_layouts: tuple[InterleavedPrefillLayout, ...]
@@ -467,6 +355,8 @@ def build_student_layout(
         physical_position_ids=physical_position_ids,
         physical_source_indices=physical_source_indices,
         query_frontiers=query_frontiers,
+        query_lengths=tuple(row.inline_length for row in interleaved_layouts),
+        kv_lengths=tuple(row.physical_length for row in interleaved_layouts),
         target_rows=tuple(target_rows),
         context_placements=tuple(placements_by_sample),
         interleaved_layouts=tuple(interleaved_layouts),
@@ -684,11 +574,28 @@ def run_inline_prefill(
         body,
         nope_dim,
     )
-    attention_mask = build_physical_causal_mask(
-        layout.query_frontiers,
-        layout.query_valid,
-        layout.physical_valid,
-        hidden_states.dtype,
+    use_cuda_flex = (
+        hidden_states.device.type == "cuda" and attention_backend == "flex"
+    )
+    flex_query_lengths = (
+        torch.tensor(layout.query_lengths, dtype=torch.int32, device=hidden_states.device)
+        if use_cuda_flex
+        else None
+    )
+    flex_kv_lengths = (
+        torch.tensor(layout.kv_lengths, dtype=torch.int32, device=hidden_states.device)
+        if use_cuda_flex
+        else None
+    )
+    attention_mask = (
+        None
+        if use_cuda_flex
+        else build_physical_causal_mask(
+            layout.query_frontiers,
+            layout.query_valid,
+            layout.physical_valid,
+            hidden_states.dtype,
+        )
     )
 
     for layer_index, decoder_layer in enumerate(body.layers):
@@ -723,20 +630,23 @@ def run_inline_prefill(
             key,
             value,
         )
-        if hidden_states.device.type == "cuda" and attention_backend == "flex":
-            if hidden_states.size(0) != 1:
-                raise ValueError("Train FlexAttention currently requires forward_batch_size=1.")
+        if use_cuda_flex:
             dropout = float(getattr(attention, "attention_dropout", 0.0))
             if attention.training and dropout:
                 raise ValueError("Train FlexAttention does not support attention dropout.")
+            assert flex_query_lengths is not None
+            assert flex_kv_lengths is not None
             attended = _COMPILED_DENSE_TRAIN_FLEX_ATTENTION(
                 query,
                 combined_key,
                 combined_value,
                 layout.query_frontiers,
+                flex_query_lengths,
+                flex_kv_lengths,
                 attention.scaling,
             ).transpose(1, 2).contiguous()
         elif hidden_states.device.type == "cuda":
+            assert attention_mask is not None
             dropout = float(getattr(attention, "attention_dropout", 0.0))
             attended = F.scaled_dot_product_attention(
                 query,
@@ -748,6 +658,7 @@ def run_inline_prefill(
                 enable_gqa=True,
             ).transpose(1, 2).contiguous()
         else:
+            assert attention_mask is not None
             attended = _eager_attention(
                 attention,
                 query,

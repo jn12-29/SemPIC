@@ -13,7 +13,7 @@ from sempic.prompt import TokenSpan, TokenizedPrompt
 from sempic.utils.generate import GenerationCache
 from sempic.utils.lora import disable_lora_adapters, set_lora_trainable_only
 from sempic.utils.student_prefill import (
-    _collect_train_flex_attention_shapes,
+    _dense_train_flex_attention,
     _interleave_layer_kv,
     _length_aware_context_embeds,
     build_logical_causal_mask,
@@ -22,7 +22,6 @@ from sempic.utils.student_prefill import (
     collect_context_blocks,
     pack_rerotated_contexts,
     prepare_context_blocks,
-    probe_train_flex_attention_shapes,
 )
 
 
@@ -50,39 +49,170 @@ class FakeModel(torch.nn.Module):
 
 
 class StudentPrefillHelperTests(unittest.TestCase):
-    def test_flex_shape_collection_includes_wrapper_and_teacher_forcing(self):
-        prompts = [
-            make_prompt(
-                [1, 2, 3, 4],
-                [("inline", 0, 1), ("context", 1, 3), ("inline", 3, 4)],
-            ),
-            make_prompt(
-                [5, 6, 7, 8],
-                [("inline", 0, 1), ("context", 1, 3), ("inline", 3, 4)],
-            ),
-            make_prompt(
-                [12, 13, 14, 15],
-                [("inline", 0, 1), ("context", 1, 3), ("inline", 3, 4)],
-            ),
-        ]
-        samples = [make_sample(prompt, index) for index, prompt in enumerate(prompts)]
-        cache = GenerationCache()
-        for index, sequence in enumerate(([9, 10, 11], [9, 10, 11], [9, 10])):
-            cache.add(f"sample-{index}", {
-                "sequences": [torch.tensor(sequence)],
-                "logits": [],
-                "text": [""],
-            })
-        wrapper = PacketWrapper(1, 1, 4, device=torch.device("cpu"))
-
-        shapes = _collect_train_flex_attention_shapes(
-            samples,
-            cache,
-            wrapper,
-            torch.device("cpu"),
+    def test_flex_score_mod_matches_independent_batched_padding_reference(self):
+        torch.manual_seed(0)
+        batch_size = 2
+        query_heads = 4
+        kv_heads = 2
+        query_capacity = 4
+        kv_capacity = 5
+        head_dim = 3
+        scale = 0.5
+        query_lengths = torch.tensor([4, 2], dtype=torch.int32)
+        kv_lengths = torch.tensor([5, 3], dtype=torch.int32)
+        frontiers = torch.tensor(
+            [[0, 2, 3, 4], [1, 2, 0, 0]],
+            dtype=torch.long,
         )
 
-        self.assertEqual(shapes, ((4, 8), (3, 7)))
+        base_query = torch.randn(
+            batch_size,
+            query_heads,
+            query_capacity,
+            head_dim,
+            dtype=torch.float64,
+        )
+        base_key = torch.randn(
+            batch_size,
+            kv_heads,
+            kv_capacity,
+            head_dim,
+            dtype=torch.float64,
+        )
+        base_value = torch.randn_like(base_key)
+        base_query[1, :, 2:] = 1_000.0
+        base_key[1, :, 3:] = -2_000.0
+        base_value[1, :, 3:] = 3_000.0
+
+        query = base_query.clone().requires_grad_()
+        key = base_key.clone().requires_grad_()
+        value = base_value.clone().requires_grad_()
+        reference_query = base_query.clone().requires_grad_()
+        reference_key = base_key.clone().requires_grad_()
+        reference_value = base_value.clone().requires_grad_()
+
+        def fake_flex_attention(
+            fake_query,
+            fake_key,
+            fake_value,
+            *,
+            score_mod,
+            scale,
+            enable_gqa,
+            kernel_options,
+        ):
+            self.assertTrue(enable_gqa)
+            self.assertEqual(kernel_options, {"FORCE_USE_FLEX_ATTENTION": True})
+            repeats = fake_query.size(1) // fake_key.size(1)
+            expanded_key = fake_key.repeat_interleave(repeats, dim=1)
+            expanded_value = fake_value.repeat_interleave(repeats, dim=1)
+            scores = torch.matmul(fake_query, expanded_key.transpose(-2, -1)) * scale
+            batch_index = torch.arange(batch_size).view(batch_size, 1, 1, 1)
+            head_index = torch.arange(query_heads).view(1, query_heads, 1, 1)
+            query_index = torch.arange(query_capacity).view(1, 1, query_capacity, 1)
+            key_index = torch.arange(kv_capacity).view(1, 1, 1, kv_capacity)
+            modified_scores = score_mod(
+                scores,
+                batch_index,
+                head_index,
+                query_index,
+                key_index,
+            )
+            safe_rows = torch.isfinite(modified_scores).any(dim=-1, keepdim=True)
+            safe_scores = torch.where(
+                safe_rows,
+                modified_scores,
+                torch.zeros_like(modified_scores),
+            )
+            probabilities = torch.softmax(safe_scores, dim=-1)
+            probabilities = torch.where(
+                safe_rows,
+                probabilities,
+                torch.zeros_like(probabilities),
+            )
+            return torch.matmul(probabilities, expanded_value)
+
+        def independent_reference(reference_q, reference_k, reference_v):
+            groups = query_heads // kv_heads
+            batch_outputs = []
+            for batch_index in range(batch_size):
+                head_outputs = []
+                for query_head in range(query_heads):
+                    kv_head = query_head // groups
+                    rows = []
+                    for query_index in range(query_capacity):
+                        if query_index >= int(query_lengths[batch_index]):
+                            rows.append(
+                                reference_q[batch_index, query_head, query_index] * 0.0
+                            )
+                            continue
+                        key_count = min(
+                            int(kv_lengths[batch_index]),
+                            int(frontiers[batch_index, query_index]) + 1,
+                        )
+                        row_scores = (
+                            reference_q[batch_index, query_head, query_index]
+                            * reference_k[batch_index, kv_head, :key_count]
+                        ).sum(dim=-1) * scale
+                        probabilities = torch.softmax(row_scores, dim=-1)
+                        rows.append(
+                            torch.matmul(
+                                probabilities,
+                                reference_v[batch_index, kv_head, :key_count],
+                            )
+                        )
+                    head_outputs.append(torch.stack(rows))
+                batch_outputs.append(torch.stack(head_outputs))
+            return torch.stack(batch_outputs)
+
+        with mock.patch(
+            "sempic.utils.student_prefill.flex_attention",
+            side_effect=fake_flex_attention,
+        ):
+            actual = _dense_train_flex_attention(
+                query,
+                key,
+                value,
+                frontiers,
+                query_lengths,
+                kv_lengths,
+                scale,
+            )
+        expected = independent_reference(
+            reference_query,
+            reference_key,
+            reference_value,
+        )
+        upstream = torch.randn_like(actual)
+        actual_gradients = torch.autograd.grad(actual, (query, key, value), upstream)
+        expected_gradients = torch.autograd.grad(
+            expected,
+            (reference_query, reference_key, reference_value),
+            upstream,
+        )
+
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+        for actual_gradient, expected_gradient in zip(
+            actual_gradients,
+            expected_gradients,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_gradient,
+                expected_gradient,
+                atol=1e-12,
+                rtol=1e-12,
+            )
+        torch.testing.assert_close(actual[1, :, 2:], torch.zeros_like(actual[1, :, 2:]))
+        torch.testing.assert_close(
+            actual_gradients[0][1, :, 2:],
+            torch.zeros_like(actual_gradients[0][1, :, 2:]),
+        )
+        for gradient in actual_gradients[1:]:
+            torch.testing.assert_close(
+                gradient[1, :, 3:],
+                torch.zeros_like(gradient[1, :, 3:]),
+            )
 
     def test_collects_context_blocks_with_canonical_views_and_mapping(self):
         prompts = [
@@ -418,8 +548,10 @@ class StudentPrefillModelTests(unittest.TestCase):
                 self.assertGreater(float(wrapper.header.grad.norm()), 0.0)
                 self.assertGreater(float(wrapper.trailer.grad.norm()), 0.0)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for SDPA parity.")
-    def test_cuda_sdpa_loss_and_packet_gradients_match_cpu_eager(self):
+    @unittest.skipUnless(
+        torch.cuda.is_available(), "CUDA is required for SDPA and Flex parity."
+    )
+    def test_cuda_sdpa_and_batched_flex_loss_and_packet_gradients_match_cpu_eager(self):
         torch.manual_seed(0)
         prompts = [
             make_prompt(
@@ -445,12 +577,6 @@ class StudentPrefillModelTests(unittest.TestCase):
         for parameter in cpu_model.parameters():
             parameter.requires_grad = False
         cuda_model = copy.deepcopy(cpu_model).to("cuda").eval()
-        probe_train_flex_attention_shapes(
-            samples[:1],
-            cuda_model,
-            self._build_cache(prompts, cpu_model.config.vocab_size),
-            PacketWrapper(1, 1, 64, device=torch.device("cuda")),
-        )
 
         for loss_type in ("ce", "kl"):
             with self.subTest(loss_type=loss_type):
@@ -506,7 +632,7 @@ class StudentPrefillModelTests(unittest.TestCase):
                 flex_cuda_wrapper = PacketWrapper(1, 1, 64, device=torch.device("cuda"))
                 flex_cuda_wrapper.load_state_dict(flex_cpu_wrapper.state_dict())
                 flex_cpu_loss, flex_cpu_tokens, _ = batched_student_loss(
-                    samples[:1],
+                    samples,
                     cpu_model,
                     cache,
                     config,
@@ -515,16 +641,22 @@ class StudentPrefillModelTests(unittest.TestCase):
                     packet_wrapper=flex_cpu_wrapper,
                     attention_backend="flex",
                 )
-                flex_cuda_loss, flex_cuda_tokens, _ = batched_student_loss(
-                    samples[:1],
-                    cuda_model,
-                    cache,
-                    config,
-                    lora_enabled=False,
-                    lora_adapter_name=None,
-                    packet_wrapper=flex_cuda_wrapper,
-                    attention_backend="flex",
-                )
+                with mock.patch(
+                    "sempic.utils.student_prefill.build_physical_causal_mask",
+                    side_effect=AssertionError(
+                        "CUDA FlexAttention must not build a dense physical mask."
+                    ),
+                ):
+                    flex_cuda_loss, flex_cuda_tokens, _ = batched_student_loss(
+                        samples,
+                        cuda_model,
+                        cache,
+                        config,
+                        lora_enabled=False,
+                        lora_adapter_name=None,
+                        packet_wrapper=flex_cuda_wrapper,
+                        attention_backend="flex",
+                    )
                 flex_cpu_loss.backward()
                 flex_cuda_loss.backward()
 

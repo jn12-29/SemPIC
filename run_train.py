@@ -479,7 +479,6 @@ def train_one_config(
     attention_runtime = (
         create_train_attention_runtime(
             model,
-            train_config["forward_batch_size"],
             train_config["attention_backend"],
         )
         if start_epoch < train_config["total_epoch"]
