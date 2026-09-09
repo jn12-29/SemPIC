@@ -160,7 +160,7 @@ def _stream_compact_terminal_basis(
             raise ValueError("Physical layout changed across attention layers.")
         if value.layer_index != layer_count:
             raise ValueError("Attention basis callbacks must be complete and ordered.")
-        if not torch.equal(value.selected_query_indices.cpu(), selected):
+        if not torch.equal(value.selected_query_indices.cpu(), selected.cpu()):
             raise ValueError("Compact prefill observed unexpected query rows.")
         expected = (
             1,
