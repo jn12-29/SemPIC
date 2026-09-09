@@ -26,7 +26,6 @@ class GenerationCacheExportTests(unittest.TestCase):
         cache_key = hashlib.sha256(b"semantic-key").hexdigest()
         generation = {
             "sequences": [torch.tensor([7, 8], dtype=torch.long)],
-            "logits": [],
             "text": ["answer"],
         }
         prompt = TokenizedPrompt(
@@ -53,7 +52,6 @@ class GenerationCacheExportTests(unittest.TestCase):
                 "template": "tokenizer_chat",
                 "template_kwargs": {},
             }],
-            "store_logits": True,
             "gen_batch_size": 1,
             "cache_device": "cpu",
             "seed": 42,
@@ -70,7 +68,6 @@ class GenerationCacheExportTests(unittest.TestCase):
                     "tokenizer_path": "tokenizer",
                     "dtype": "bfloat16",
                     "tokenizer": {"pad_token_id": 0, "eos_token_id": 2},
-                    "store_logits": False,
                 },
             ) as writer:
                 writer.add(cache_key, generation)

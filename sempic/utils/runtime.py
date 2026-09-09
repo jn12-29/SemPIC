@@ -212,17 +212,12 @@ def generation_summary(
     save_token_ids: bool = False,
 ) -> dict[str, Any]:
     sequences = generation.get("sequences", [])
-    logits = generation.get("logits", [])
     texts = generation.get("text", [])
     summary: dict[str, Any] = {
         "num_sequences": len(sequences),
         "sequence_lengths": [
             int(sequence.numel()) if isinstance(sequence, torch.Tensor) else None
             for sequence in sequences
-        ],
-        "logit_shapes": [
-            list(logit.shape) if isinstance(logit, torch.Tensor) else None
-            for logit in logits
         ],
         "texts": [
             {"text": text, "length": len(text)}

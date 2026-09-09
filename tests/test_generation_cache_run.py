@@ -34,7 +34,6 @@ def config_dict(output_dir: Path, **overrides):
                 "subset": "1k",
             }
         ],
-        "store_logits": True,
         "output_dir": str(output_dir),
     }
     config.update(overrides)
@@ -57,7 +56,6 @@ class GenerationCacheConfigTests(unittest.TestCase):
 
     def test_rejects_invalid_owned_fields(self):
         cases = (
-            ({"store_logits": "true"}, "store_logits"),
             ({"gen_batch_size": 0}, "gen_batch_size"),
             ({"cache_device": "not a device"}, "cache_device"),
             ({"data_configs": []}, "data_configs"),
@@ -95,7 +93,7 @@ class GenerationCacheArtifactTests(unittest.TestCase):
             self.assertTrue(source.is_dir())
             self.assertEqual(list(destination.iterdir()), [])
 
-    def _run_patches(self, *, store_logits=True):
+    def _run_patches(self):
         tokenizer = SimpleNamespace(
             padding_side="right",
             pad_token_id=7,
@@ -110,10 +108,8 @@ class GenerationCacheArtifactTests(unittest.TestCase):
         )
 
         def build_cache(**kwargs):
-            self.assertIs(kwargs["store_logits"], store_logits)
             kwargs["generation_sink"](SAMPLE_KEY, {
                 "sequences": [torch.tensor([1])],
-                "logits": [torch.zeros(1, 2)] if store_logits else [],
                 "text": ["x"],
             })
             return mock.Mock(), True
@@ -159,16 +155,6 @@ class GenerationCacheArtifactTests(unittest.TestCase):
             self.assertEqual(resolved["model"]["tokenizer"]["padding_side"], "right")
             self.assertEqual(resolved["model"]["generation_kwargs"]["max_new_tokens"], 3)
             self.assertEqual(build.call_args.kwargs["batch_size"], 1)
-
-    def test_store_logits_false_is_forwarded(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output_dir = Path(directory) / "artifact"
-            config = load_generation_cache_config(
-                config_dict(output_dir, store_logits=False)
-            )
-            patches = self._run_patches(store_logits=False)
-            with patches[0], patches[1], patches[2]:
-                generate_cache_artifact(config)
 
     def test_existing_target_fails_before_resources_load(self):
         with tempfile.TemporaryDirectory() as directory:

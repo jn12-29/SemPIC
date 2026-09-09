@@ -28,7 +28,7 @@ from ..prefill import (
     build_interleaved_layout,
 )
 from ..prompt import TokenizedPrompt
-from .generate import GenerationCacheAccess
+from .generate import GenerationCacheAccess, get_teacher_logits
 from .lora import (
     get_causal_lm_body,
     get_model_device,
@@ -679,6 +679,31 @@ def run_inline_prefill(
     )
 
 
+def _online_teacher_logits(
+    model: Any,
+    prompt: TokenizedPrompt,
+    sequences: list[torch.Tensor],
+    *,
+    lora_enabled: bool,
+) -> list[torch.Tensor]:
+    """Score one request's cached trajectories with the frozen, full-context teacher."""
+    training_states = [(module, module.training) for module in model.modules()]
+    adapter_context = lora_adapters_disabled(model) if lora_enabled else nullcontext()
+    try:
+        with adapter_context:
+            model.eval()
+            prompt_ids = prompt.input_ids.unsqueeze(0).repeat(len(sequences), 1)
+            return get_teacher_logits(
+                model,
+                prompt_input_ids=prompt_ids,
+                prompt_attention_mask=torch.ones_like(prompt_ids),
+                sequences=sequences,
+            )
+    finally:
+        for module, training in training_states:
+            module.training = training
+
+
 def batched_student_loss(
     samples: Sequence[Mapping[str, Any]],
     model: Any,
@@ -703,7 +728,6 @@ def batched_student_loss(
     target_indices: list[int] = []
     target_counts: list[int] = []
     teacher_sequences: list[torch.Tensor] = []
-    teacher_logits: list[torch.Tensor | None] = []
     for sample_index, sample in enumerate(samples):
         prompt = sample["prompt"]
         if not isinstance(prompt, TokenizedPrompt):
@@ -716,11 +740,6 @@ def batched_student_loss(
             raise KeyError("Missing teacher generation cache entry.")
         if not generation["sequences"]:
             raise ValueError("Training requires at least one teacher sequence per sample.")
-        if (
-            loss_config["type"] == "kl"
-            and len(generation["logits"]) != len(generation["sequences"])
-        ):
-            raise ValueError("KL loss requires one teacher logits tensor per sequence.")
         source_prompts.append(prompt)
         target_counts.append(len(generation["sequences"]))
         for target_index, teacher_sequence in enumerate(generation["sequences"]):
@@ -731,27 +750,10 @@ def batched_student_loss(
             vocab_size = int(model.config.vocab_size)
             if bool((teacher_sequence < 0).any()) or bool((teacher_sequence >= vocab_size).any()):
                 raise ValueError("Teacher sequence token IDs exceed the student vocabulary.")
-            target_logits = (
-                generation["logits"][target_index]
-                if loss_config["type"] == "kl"
-                else None
-            )
-            if target_logits is not None:
-                if target_logits.ndim != 2 or not target_logits.is_floating_point():
-                    raise ValueError(
-                        "Teacher logits must be a two-dimensional floating-point tensor."
-                    )
-                if target_logits.shape != (teacher_sequence.numel(), vocab_size):
-                    raise ValueError(
-                        "Teacher logits must match the teacher sequence length and student vocabulary."
-                    )
             target_prompts.append(prompt)
             target_owners.append(sample_index)
             target_indices.append(target_index)
             teacher_sequences.append(teacher_sequence.to(device))
-            teacher_logits.append(
-                target_logits.to(device) if target_logits is not None else None
-            )
 
     context_items = collect_context_blocks(source_prompts)
     prepared_contexts, context_lengths = prepare_context_blocks(
@@ -791,19 +793,32 @@ def batched_student_loss(
 
     losses_by_sample: list[list[torch.Tensor]] = [[] for _ in samples]
     total_tokens = 0
-    for target_row, (student_logits, teacher_sequence, target_logits) in enumerate(
-        zip(logits_by_target, teacher_sequences, teacher_logits, strict=True)
+    request_logits: list[torch.Tensor] = []
+    for target_row, (student_logits, teacher_sequence) in enumerate(
+        zip(logits_by_target, teacher_sequences, strict=True)
     ):
         if student_logits.size(0) != teacher_sequence.numel():
             raise ValueError("Student logits and teacher sequence lengths differ.")
         if loss_config["type"] == "kl":
-            assert target_logits is not None
+            sample_index = target_owners[target_row]
+            if target_indices[target_row] == 0:
+                request_logits = []
+                request_logits = _online_teacher_logits(
+                    model,
+                    source_prompts[sample_index],
+                    teacher_sequences[target_row:target_row + target_counts[sample_index]],
+                    lora_enabled=lora_enabled,
+                )
+            target_logits = request_logits[target_indices[target_row]]
             if target_logits.shape != student_logits.shape:
                 raise ValueError(
                     f"Student/teacher logits shape mismatch: {student_logits.shape} vs {target_logits.shape}."
                 )
             tau = float(loss_config["tau"])
             teacher_probs = F.softmax(target_logits / tau, dim=-1)
+            del target_logits
+            if target_indices[target_row] + 1 == target_counts[sample_index]:
+                request_logits = []
             student_log_probs = F.log_softmax(student_logits / tau, dim=-1)
             target_loss = (tau * tau) * F.kl_div(
                 student_log_probs,

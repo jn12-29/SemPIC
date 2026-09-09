@@ -57,7 +57,7 @@ Repository-specific instructions for agents working in this project.
 
 - `_default.json` files fill missing fields in sibling configs. Explicit fields in the selected config win, including nested fields such as `model.model_path`.
 - `train.targets` may include only enabled components from `lora.enabled` and `packet_wrapper.enabled`.
-- `loss.type == "kl"` stores teacher logits in the generation cache; `loss.type == "ce"` stores teacher sequences only.
+- Both KL and CE cache teacher sequences only. KL computes frozen teacher logits online per request with a teacher-forced forward over the full prompt and cached answer tokens; it never repeats decoding or writes logits back to the cache.
 - A concrete training run is `<output_dir>/<YYYYMMDD_HHMMSS[_suffix]>/`. LoRA is saved to `<run_dir>/lora/`, PacketWrapper to `<run_dir>/packet_wrapper.pt`, and joint training writes both into the same run directory.
 - `lora.adapter_name` must be `default` so the adapter is saved directly in `<run_dir>/lora/`.
 - Config `run_suffix` is optional; CLI `--run-suffix` overrides it for new runs. It must start with an alphanumeric character and may otherwise contain letters, digits, `.`, `_`, and `-`. Resume exactly one concrete run with `--resume-from <run_dir>`; symlinks are rejected, and `--run-suffix` cannot be combined with resume.

@@ -19,7 +19,6 @@ from .generate import (
     GenerationOutput,
     TokenizerType,
     get_generation,
-    get_teacher_logits,
     resolve_generation_config,
 )
 from .lora import (
@@ -409,7 +408,6 @@ def build_generation_cache(
     tokenizer: TokenizerType,
     generation_config: GenerationConfig | None = None,
     generation_cache: GenerationCache | None = None,
-    store_logits: bool = True,
     debug_recorder: DebugRecorder | None = None,
     generation_sink: Callable[[str, GenerationOutput], None] | None = None,
 ) -> tuple[GenerationCache, bool]:
@@ -419,30 +417,12 @@ def build_generation_cache(
     effective_config = resolve_generation_config(model, generation_config)
 
     samples_to_gen_by_key: dict[str, TrainSample] = {}
-    samples_to_refresh_by_key: dict[str, tuple[TrainSample, Any]] = {}
     for sample in samples:
         key = sample["semantic_key"]
         generation = generation_cache.get(key)
         if generation is None:
             samples_to_gen_by_key.setdefault(key, sample)
-        elif store_logits and len(generation["logits"]) != len(generation["sequences"]):
-            samples_to_refresh_by_key.setdefault(key, (sample, generation))
-
-    for key, (sample, generation) in samples_to_refresh_by_key.items():
-        prompt_ids = sample["prompt"].input_ids.unsqueeze(0)
-        num_sequences = len(generation["sequences"])
-        logits = get_teacher_logits(
-            model,
-            prompt_input_ids=prompt_ids.repeat(num_sequences, 1),
-            prompt_attention_mask=torch.ones_like(prompt_ids).repeat(num_sequences, 1),
-            sequences=generation["sequences"],
-        )
-        generation["logits"] = (
-            [logits_tensor.to(generation_cache.device) for logits_tensor in logits]
-            if generation_cache.device is not None
-            else logits
-        )
-    changed = bool(samples_to_refresh_by_key)
+    changed = False
     samples_to_gen = [
         (sample, key)
         for key, sample in samples_to_gen_by_key.items()
@@ -455,7 +435,6 @@ def build_generation_cache(
                 {
                     "status": "hit",
                     "num_cached": len(generation_cache),
-                    "store_logits": store_logits,
                 },
             )
         return generation_cache, changed
@@ -476,7 +455,6 @@ def build_generation_cache(
                 "num_cached_before": len(generation_cache),
                 "num_to_generate": len(samples_to_gen),
                 "batch_size": batch_size,
-                "store_logits": store_logits,
                 "input_lengths": [
                     item[0]["prompt"].input_ids.numel()
                     for item in samples_to_gen
@@ -497,7 +475,6 @@ def build_generation_cache(
             input_ids=batch_input_ids,
             attention_mask=batch_attention_mask,
             generation_config=effective_config,
-            output_logits=store_logits,
         )
         num_return_sequences = effective_config.num_return_sequences
 
@@ -508,7 +485,6 @@ def build_generation_cache(
             end = start + num_return_sequences
             generation = {
                 "sequences": gen["sequences"][start:end],
-                "logits": gen["logits"][start:end] if store_logits else [],
                 "text": gen["text"][start:end],
             }
             sample_debug = (
@@ -527,7 +503,6 @@ def build_generation_cache(
                             generation,
                             save_token_ids=sample_debug.config["save_token_ids"],
                         ),
-                        "stored_logits": store_logits,
                         "input_tensor": [
                             tensor_summary(sequence)
                             for sequence in generation["sequences"]

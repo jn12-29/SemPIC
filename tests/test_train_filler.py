@@ -63,8 +63,6 @@ def write_generation_artifact(
         generation = cache.get(key)
         assert generation is not None
         generations.append((key, generation))
-    stores_logits = {bool(generation["logits"]) for _, generation in generations}
-    assert len(stores_logits) == 1
     with StreamingGenerationCacheWriter(
         path,
         provenance={
@@ -76,7 +74,6 @@ def write_generation_artifact(
                 "pad_token_id": 0,
                 "eos_token_id": 2,
             },
-            "store_logits": stores_logits.pop(),
         },
     ) as writer:
         for key, generation in generations:
@@ -358,32 +355,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "legacy"):
             load_train_config(config)
 
-    def test_loss_config_controls_generation_cache_logits(self):
-        class FakeModel:
-            generation_config = GenerationConfig()
-
-            def eval(self):
-                return None
-
-        for loss_kind, expected_store_logits in (("kl", True), ("ce", False)):
-            train_config = load_train_config(
-                build_train_config_dict(loss={"type": loss_kind, "tau": 1.0})
-            )
-            with mock.patch.object(
-                run_train,
-                "build_generation_cache",
-                return_value=(GenerationCache(), False),
-            ) as build_cache_mock:
-                run_train.prepare_generation_cache(
-                    train_config=train_config,
-                    samples=[],
-                    model=FakeModel(),
-                    tokenizer=cache_tokenizer(),  # type: ignore[arg-type]
-                    generation_config=None,
-                )
-
-            self.assertIs(build_cache_mock.call_args.kwargs["store_logits"], expected_store_logits)
-
     def test_teacher_generation_defaults_to_greedy_but_allows_sampling(self):
         tokenizer = SimpleNamespace(pad_token_id=17)
         model = SimpleNamespace(generation_config=GenerationConfig())
@@ -445,7 +416,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
         cache = GenerationCache(device=torch.device("cpu"))
         cache.add(sample["semantic_key"], {
             "sequences": [torch.tensor([1], dtype=torch.long)],
-            "logits": [torch.zeros(1, 3)],
             "text": ["x"],
         })
 
@@ -498,7 +468,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
             cache_path = Path(temp_dir) / "cache"
             cache.add(hashlib.sha256(b"unrelated").hexdigest(), {
                 "sequences": [torch.tensor([1])],
-                "logits": [torch.zeros(1, 3)],
                 "text": ["x"],
             })
             write_generation_artifact(cache_path, cache)
@@ -515,12 +484,11 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                     generation_config=None,
                 )
 
-    def test_existing_kl_cache_requires_logits_for_each_sequence(self):
+    def test_existing_kl_cache_accepts_sequences_only(self):
         sample = make_sample()
         cache = GenerationCache()
         cache.add(sample["semantic_key"], {
             "sequences": [torch.tensor([1], dtype=torch.long)],
-            "logits": [],
             "text": ["x"],
         })
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -530,8 +498,8 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                 build_train_config_dict(cache_path=str(cache_path))
             )
 
-            with self.assertRaisesRegex(ValueError, "without KL logits"):
-                run_train.prepare_generation_cache(
+            with mock.patch.object(run_train, "build_generation_cache") as build_cache:
+                loaded = run_train.prepare_generation_cache(
                     train_config=train_config,
                     samples=[sample],  # type: ignore[list-item]
                     model=object(),
@@ -539,12 +507,14 @@ class UnifiedTrainConfigTests(unittest.TestCase):
                     generation_config=None,
                 )
 
+            build_cache.assert_not_called()
+            self.assertNotIn("logits", loaded.get(sample["semantic_key"]))
+
     def test_existing_cache_must_match_configured_training_model(self):
         sample = make_sample()
         cache = GenerationCache()
         cache.add(sample["semantic_key"], {
             "sequences": [torch.tensor([1], dtype=torch.long)],
-            "logits": [torch.zeros(1, 3)],
             "text": ["x"],
         })
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -568,7 +538,6 @@ class UnifiedTrainConfigTests(unittest.TestCase):
         cache = GenerationCache()
         cache.add(sample["semantic_key"], {
             "sequences": [torch.tensor([1], dtype=torch.long)],
-            "logits": [torch.zeros(1, 3)],
             "text": ["x"],
         })
         with tempfile.TemporaryDirectory() as temp_dir:

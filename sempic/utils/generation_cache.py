@@ -15,7 +15,7 @@ import torch
 from safetensors import safe_open
 
 
-CACHE_FORMAT_VERSION = 2
+CACHE_FORMAT_VERSION = 3
 CACHE_PAYLOAD_FILENAME = "cache.safetensors"
 CACHE_MANIFEST_FILENAME = "manifest.json"
 CACHE_RESOLVED_CONFIG_FILENAME = "resolved_config.json"
@@ -24,13 +24,11 @@ _ARTIFACT_FILENAMES = {
     CACHE_MANIFEST_FILENAME,
     CACHE_RESOLVED_CONFIG_FILENAME,
 }
-_FLOAT_DTYPES = {"F16", "BF16", "F32", "F64"}
 _DEFAULT_HEADER_RESERVE_BYTES = 2 * 1024 * 1024
 
 
 class GenerationOutput(TypedDict):
     sequences: list[torch.Tensor]
-    logits: list[torch.Tensor]
     text: list[str]
 
 
@@ -45,7 +43,6 @@ class TensorMetadata:
 @dataclass(frozen=True)
 class GenerationEntryMetadata:
     sequences: tuple[TensorMetadata, ...]
-    logits: tuple[TensorMetadata, ...]
     text: tuple[str, ...]
     content_digest: str
 
@@ -60,14 +57,6 @@ class GenerationEntryMetadata:
     @property
     def sequence_shapes(self) -> tuple[tuple[int, ...], ...]:
         return tuple(tensor.shape for tensor in self.sequences)
-
-    @property
-    def logit_shapes(self) -> tuple[tuple[int, ...], ...]:
-        return tuple(tensor.shape for tensor in self.logits)
-
-    @property
-    def has_logits(self) -> bool:
-        return bool(self.logits)
 
 
 class GenerationCacheReader(Protocol):
@@ -87,29 +76,6 @@ class GenerationCacheReader(Protocol):
     def __contains__(self, key: object) -> bool: ...
 
     def __len__(self) -> int: ...
-
-
-_TORCH_TO_SAFETENSORS_DTYPE = {
-    torch.bool: "BOOL",
-    torch.uint8: "U8",
-    torch.int8: "I8",
-    torch.int16: "I16",
-    torch.int32: "I32",
-    torch.int64: "I64",
-    torch.float16: "F16",
-    torch.bfloat16: "BF16",
-    torch.float32: "F32",
-    torch.float64: "F64",
-}
-for _torch_name, _safe_name in (
-    ("uint16", "U16"),
-    ("uint32", "U32"),
-    ("uint64", "U64"),
-    ("float8_e4m3fn", "F8_E4M3"),
-    ("float8_e5m2", "F8_E5M2"),
-):
-    if hasattr(torch, _torch_name):
-        _TORCH_TO_SAFETENSORS_DTYPE[getattr(torch, _torch_name)] = _safe_name
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -141,19 +107,17 @@ def _validate_semantic_key(key: Any, field: str) -> str:
 
 def _validate_provenance(value: Any) -> dict[str, Any]:
     provenance = _require_dict(value, "manifest.provenance")
-    required = {"model_path", "tokenizer_path", "dtype", "tokenizer", "store_logits"}
+    required = {"model_path", "tokenizer_path", "dtype", "tokenizer"}
     if set(provenance) != required:
         raise ValueError(
             "Generation-cache provenance must contain exactly model_path, "
-            "tokenizer_path, dtype, tokenizer, and store_logits."
+            "tokenizer_path, dtype, and tokenizer."
         )
     for field in ("model_path", "tokenizer_path", "dtype"):
         if not isinstance(provenance[field], str) or not provenance[field]:
             raise ValueError(f"Generation-cache provenance {field} must be non-empty.")
     if not isinstance(provenance["tokenizer"], dict):
         raise ValueError("Generation-cache provenance tokenizer must be an object.")
-    if not isinstance(provenance["store_logits"], bool):
-        raise ValueError("Generation-cache provenance store_logits must be boolean.")
     return json.loads(_canonical_json_bytes(provenance))
 
 
@@ -166,7 +130,6 @@ def generation_cache_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
     tokenizer_path = model.get("tokenizer_path", model_path)
     dtype = model.get("dtype")
     tokenizer = model.get("tokenizer")
-    store_logits = config.get("store_logits")
     if not isinstance(model_path, str) or not model_path:
         raise ValueError("Generation-cache provenance requires model.model_path.")
     if not isinstance(tokenizer_path, str) or not tokenizer_path:
@@ -175,14 +138,11 @@ def generation_cache_provenance(config: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Generation-cache provenance requires model.dtype.")
     if not isinstance(tokenizer, Mapping):
         raise ValueError("Generation-cache provenance requires model.tokenizer.")
-    if not isinstance(store_logits, bool):
-        raise ValueError("Generation-cache provenance requires boolean store_logits.")
     return _validate_provenance({
         "model_path": model_path,
         "tokenizer_path": tokenizer_path,
         "dtype": dtype,
         "tokenizer": dict(tokenizer),
-        "store_logits": store_logits,
     })
 
 
@@ -200,7 +160,7 @@ def _parse_tensor_metadata(value: Any, field: str) -> TensorMetadata:
     digest = data.get("digest")
     if not isinstance(tensor, str) or not tensor:
         raise ValueError(f"{field}.tensor must be a non-empty string.")
-    if dtype not in set(_TORCH_TO_SAFETENSORS_DTYPE.values()):
+    if dtype != "I64":
         raise ValueError(f"{field}.dtype is unsupported: {dtype!r}.")
     if (
         not isinstance(shape, list)
@@ -218,7 +178,6 @@ def _parse_tensor_metadata(value: Any, field: str) -> TensorMetadata:
 
 def _entry_digest_payload(
     sequences: Sequence[TensorMetadata],
-    logits: Sequence[TensorMetadata],
     text: Sequence[str],
 ) -> dict[str, Any]:
     def tensor_payload(tensor: TensorMetadata) -> dict[str, Any]:
@@ -230,7 +189,6 @@ def _entry_digest_payload(
 
     return {
         "sequences": [tensor_payload(tensor) for tensor in sequences],
-        "logits": [tensor_payload(tensor) for tensor in logits],
         "text": list(text),
     }
 
@@ -238,28 +196,19 @@ def _entry_digest_payload(
 def _parse_entry_metadata(value: Any, field: str) -> GenerationEntryMetadata:
     data = _require_dict(value, field)
     raw_sequences = data.get("sequences")
-    raw_logits = data.get("logits")
     raw_text = data.get("text")
     content_digest = data.get("content_digest")
     if not isinstance(raw_sequences, list) or not raw_sequences:
         raise ValueError(f"{field}.sequences must be a non-empty list.")
-    if not isinstance(raw_logits, list):
-        raise ValueError(f"{field}.logits must be a list.")
     if not isinstance(raw_text, list) or any(not isinstance(item, str) for item in raw_text):
         raise ValueError(f"{field}.text must be a list of strings.")
     sequences = tuple(
         _parse_tensor_metadata(item, f"{field}.sequences[{index}]")
         for index, item in enumerate(raw_sequences)
     )
-    logits = tuple(
-        _parse_tensor_metadata(item, f"{field}.logits[{index}]")
-        for index, item in enumerate(raw_logits)
-    )
     text = tuple(raw_text)
     if len(text) != len(sequences):
         raise ValueError(f"{field}.text count must match sequences.")
-    if logits and len(logits) != len(sequences):
-        raise ValueError(f"{field}.logits count must be zero or match sequences.")
     for index, sequence in enumerate(sequences):
         if len(sequence.shape) != 1:
             raise ValueError(f"{field}.sequences[{index}] must be one-dimensional.")
@@ -267,21 +216,11 @@ def _parse_entry_metadata(value: Any, field: str) -> GenerationEntryMetadata:
             raise ValueError(f"{field}.sequences[{index}] must use I64 token IDs.")
         if sequence.shape[0] == 0:
             raise ValueError(f"{field}.sequences[{index}] must not be empty.")
-    for index, logit in enumerate(logits):
-        if len(logit.shape) != 2:
-            raise ValueError(f"{field}.logits[{index}] must be two-dimensional.")
-        if logit.dtype not in _FLOAT_DTYPES:
-            raise ValueError(f"{field}.logits[{index}] must use a floating dtype.")
-        if logit.shape[1] == 0:
-            raise ValueError(f"{field}.logits[{index}] vocabulary must not be empty.")
-        if logit.shape[0] != sequences[index].shape[0]:
-            raise ValueError(f"{field}.logits[{index}] length must match its sequence.")
-    expected_digest = _json_digest(_entry_digest_payload(sequences, logits, text))
+    expected_digest = _json_digest(_entry_digest_payload(sequences, text))
     if content_digest != expected_digest:
         raise ValueError(f"{field}.content_digest does not match entry metadata.")
     return GenerationEntryMetadata(
         sequences=sequences,
-        logits=logits,
         text=text,
         content_digest=expected_digest,
     )
@@ -299,7 +238,6 @@ def _tensor_metadata_json(tensor: TensorMetadata) -> dict[str, Any]:
 def _entry_metadata_json(entry: GenerationEntryMetadata) -> dict[str, Any]:
     return {
         "sequences": [_tensor_metadata_json(tensor) for tensor in entry.sequences],
-        "logits": [_tensor_metadata_json(tensor) for tensor in entry.logits],
         "text": list(entry.text),
         "content_digest": entry.content_digest,
     }
@@ -362,7 +300,7 @@ class SafetensorsGenerationCache:
         for key, raw_entry in raw_entries.items():
             _validate_semantic_key(key, "Generation-cache entry key")
             entry = _parse_entry_metadata(raw_entry, f"manifest.entries[{key!r}]")
-            for tensor in (*entry.sequences, *entry.logits):
+            for tensor in entry.sequences:
                 previous = tensor_owners.get(tensor.tensor)
                 if previous is not None:
                     raise ValueError(
@@ -371,23 +309,6 @@ class SafetensorsGenerationCache:
                     )
                 tensor_owners[tensor.tensor] = key
             entries[key] = entry
-        expects_logits = provenance["store_logits"]
-        inconsistent_logits = [
-            key for key, entry in entries.items()
-            if bool(entry.logits) != expects_logits
-        ]
-        if inconsistent_logits:
-            raise ValueError(
-                "Generation-cache entries do not match provenance.store_logits: "
-                f"{inconsistent_logits[:3]}."
-            )
-        vocab_sizes = {
-            logit.shape[1]
-            for entry in entries.values()
-            for logit in entry.logits
-        }
-        if len(vocab_sizes) > 1:
-            raise ValueError("Generation-cache logits must use one vocabulary size.")
         if not payload_path.is_file():
             raise ValueError(f"Generation-cache payload is missing: {payload_path}")
         try:
@@ -410,7 +331,7 @@ class SafetensorsGenerationCache:
                         f"missing={missing}, unexpected={unexpected}."
                     )
                 for entry in entries.values():
-                    for tensor in (*entry.sequences, *entry.logits):
+                    for tensor in entry.sequences:
                         tensor_slice = payload.get_slice(tensor.tensor)
                         if tuple(tensor_slice.get_shape()) != tensor.shape:
                             raise ValueError(
@@ -441,11 +362,10 @@ class SafetensorsGenerationCache:
         destination = None if device is None else torch.device(device)
         with safe_open(self._payload_path, framework="pt", device="cpu") as payload:
             sequences = [payload.get_tensor(tensor.tensor) for tensor in entry.sequences]
-            logits = [payload.get_tensor(tensor.tensor) for tensor in entry.logits]
         if key not in self._verified_keys:
             for tensor, metadata in zip(
-                (*sequences, *logits),
-                (*entry.sequences, *entry.logits),
+                sequences,
+                entry.sequences,
                 strict=True,
             ):
                 if _tensor_digest(tensor) != metadata.digest:
@@ -455,10 +375,8 @@ class SafetensorsGenerationCache:
             self._verified_keys.add(key)
         if destination is not None and destination.type != "cpu":
             sequences = [tensor.to(destination) for tensor in sequences]
-            logits = [tensor.to(destination) for tensor in logits]
         return GenerationOutput(
             sequences=sequences,
-            logits=logits,
             text=list(entry.text),
         )
 
@@ -504,15 +422,6 @@ class CompositeGenerationCache:
                     continue
                 self._owners[key] = cache
                 self._metadata[key] = metadata
-        vocab_sizes = {
-            logit.shape[1]
-            for metadata in self._metadata.values()
-            for logit in metadata.logits
-        }
-        if len(vocab_sizes) > 1:
-            raise ValueError(
-                "Composed generation caches must use one vocabulary size."
-            )
 
     def get(
         self,
@@ -623,7 +532,6 @@ class StreamingGenerationCacheWriter:
         self.provenance_digest = _json_digest(self.provenance)
         self._entries: dict[str, _PayloadEntry] = {}
         self._state = "open"
-        self._vocab_size: int | None = None
         self._header_reserve_bytes = _header_reserve_bytes
         self._payload_tmp = self.work_dir / f".{CACHE_PAYLOAD_FILENAME}.tmp"
         self._payload = self._payload_tmp.open("xb+", buffering=0)
@@ -638,99 +546,47 @@ class StreamingGenerationCacheWriter:
             raise RuntimeError("Cannot add entries after generation-cache writer closure.")
         _validate_semantic_key(key, "Generation-cache entry key")
         raw_sequences = generation.get("sequences")
-        raw_logits = generation.get("logits")
         raw_text = generation.get("text")
         if not isinstance(raw_sequences, list) or not raw_sequences:
             raise ValueError("Generation output sequences must be a non-empty list.")
-        if not isinstance(raw_logits, list):
-            raise ValueError("Generation output logits must be a list.")
         if not isinstance(raw_text, list) or any(not isinstance(item, str) for item in raw_text):
             raise ValueError("Generation output text must be a list of strings.")
         if len(raw_text) != len(raw_sequences):
             raise ValueError("Generation output text count must match sequences.")
-        if raw_logits and len(raw_logits) != len(raw_sequences):
-            raise ValueError("Generation output logits count must be zero or match sequences.")
-        if bool(raw_logits) != self.provenance["store_logits"]:
-            raise ValueError(
-                "Generation output logits do not match provenance.store_logits."
-            )
-        if any(not isinstance(tensor, torch.Tensor) for tensor in (*raw_sequences, *raw_logits)):
-            raise ValueError("Generation output payloads must be tensors.")
-        for kind, raw_tensors, expected_rank in (
-            ("sequence", raw_sequences, 1),
-            ("logit", raw_logits, 2),
-        ):
-            for raw_tensor in raw_tensors:
-                if raw_tensor.ndim != expected_rank:
-                    raise ValueError(
-                        f"Generation output {kind} tensors must have rank {expected_rank}."
-                    )
-                if raw_tensor.dtype not in _TORCH_TO_SAFETENSORS_DTYPE:
-                    raise ValueError(f"Unsupported cache tensor dtype: {raw_tensor.dtype}.")
-                if kind == "sequence":
-                    if raw_tensor.dtype != torch.int64:
-                        raise ValueError(
-                            "Generation output sequences must use int64 token IDs."
-                        )
-                    if raw_tensor.numel() == 0:
-                        raise ValueError("Generation output sequences must not be empty.")
-                else:
-                    if _TORCH_TO_SAFETENSORS_DTYPE[raw_tensor.dtype] not in _FLOAT_DTYPES:
-                        raise ValueError(
-                            "Generation output logits must use F16, BF16, F32, or F64."
-                        )
-                    if raw_tensor.shape[1] == 0:
-                        raise ValueError(
-                            "Generation output logits vocabulary must not be empty."
-                        )
-                    vocab_size = raw_tensor.shape[1]
-                    if self._vocab_size is not None and vocab_size != self._vocab_size:
-                        raise ValueError(
-                            "Generation output logits must use one vocabulary size."
-                        )
-        if raw_logits:
-            if len({tensor.shape[1] for tensor in raw_logits}) != 1:
-                raise ValueError("Generation output logits must use one vocabulary size.")
-            for index, (sequence, logit) in enumerate(zip(raw_sequences, raw_logits)):
-                if logit.shape[0] != sequence.shape[0]:
-                    raise ValueError(
-                        f"Generation output logits[{index}] length must match its sequence."
-                    )
-        entry_vocab_size = raw_logits[0].shape[1] if raw_logits else None
+        for tensor in raw_sequences:
+            if not isinstance(tensor, torch.Tensor):
+                raise ValueError("Generation output sequences must be tensors.")
+            if tensor.ndim != 1 or tensor.numel() == 0:
+                raise ValueError("Generation output sequences must be non-empty one-dimensional tensors.")
+            if tensor.dtype != torch.int64:
+                raise ValueError("Generation output sequences must use int64 token IDs.")
 
         entry_start = self._payload.tell()
         tensors: list[_PayloadTensor] = []
         sequence_metadata: list[TensorMetadata] = []
-        logit_metadata: list[TensorMetadata] = []
         try:
-            for kind, raw_tensors, metadata_list in (
-                ("sequence", raw_sequences, sequence_metadata),
-                ("logit", raw_logits, logit_metadata),
-            ):
-                for index, raw_tensor in enumerate(raw_tensors):
-                    tensor = raw_tensor.detach().to("cpu").contiguous()
-                    dtype = _TORCH_TO_SAFETENSORS_DTYPE[tensor.dtype]
-                    tensor_name = f"entry.{key}.{kind}.{index}"
-                    digest = hashlib.sha256()
-                    data_offset = self._payload.tell() - self._data_start
-                    num_bytes = _write_tensor_bytes(self._payload, tensor, digest)
-                    metadata = TensorMetadata(
-                        tensor=tensor_name,
-                        dtype=dtype,
-                        shape=tuple(tensor.shape),
-                        digest=digest.hexdigest(),
-                    )
-                    tensors.append(_PayloadTensor(metadata, data_offset, num_bytes))
-                    metadata_list.append(metadata)
+            for index, raw_tensor in enumerate(raw_sequences):
+                tensor = raw_tensor.detach().to("cpu").contiguous()
+                tensor_name = f"entry.{key}.sequence.{index}"
+                digest = hashlib.sha256()
+                data_offset = self._payload.tell() - self._data_start
+                num_bytes = _write_tensor_bytes(self._payload, tensor, digest)
+                metadata = TensorMetadata(
+                    tensor=tensor_name,
+                    dtype="I64",
+                    shape=tuple(tensor.shape),
+                    digest=digest.hexdigest(),
+                )
+                tensors.append(_PayloadTensor(metadata, data_offset, num_bytes))
+                sequence_metadata.append(metadata)
         except Exception:
             self._rollback_payload(entry_start)
             raise
         entry_metadata = GenerationEntryMetadata(
             sequences=tuple(sequence_metadata),
-            logits=tuple(logit_metadata),
             text=tuple(raw_text),
             content_digest=_json_digest(
-                _entry_digest_payload(sequence_metadata, logit_metadata, raw_text)
+                _entry_digest_payload(sequence_metadata, raw_text)
             ),
         )
         previous = self._entries.get(key)
@@ -740,8 +596,6 @@ class StreamingGenerationCacheWriter:
                 raise ValueError(f"Conflicting duplicate generation-cache key: {key!r}.")
             return
         self._entries[key] = _PayloadEntry(entry_metadata, tuple(tensors))
-        if self._vocab_size is None:
-            self._vocab_size = entry_vocab_size
 
     def _rollback_payload(self, offset: int) -> None:
         self._payload.seek(offset)

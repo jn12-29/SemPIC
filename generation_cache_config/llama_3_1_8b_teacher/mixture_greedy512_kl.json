@@ -5,7 +5,6 @@
         }
     },
     "output_dir": "./generation_cache/artifacts/llama_3_1_8b_teacher/mixture_greedy512_kl",
-    "store_logits": true,
     "gen_batch_size": 1,
     "data_configs": [
         {

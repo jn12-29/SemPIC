@@ -232,7 +232,6 @@ def prepare_generation_cache(
 ) -> GenerationCacheAccess:
     cache_device = torch.device(train_config["cache_device"])
     cache_paths = train_config["cache_path"]
-    store_logits = train_config["loss"]["type"] == "kl"
 
     if cache_paths is not None:
         missing_paths = [path for path in cache_paths if not os.path.isdir(path)]
@@ -280,18 +279,6 @@ def prepare_generation_cache(
             raise KeyError(
                 f"Generation cache is missing {len(missing_keys)} required semantic samples."
             )
-        if store_logits:
-            missing_logits: set[str] = set()
-            for sample in samples:
-                key = sample["semantic_key"]
-                metadata = generation_cache.metadata(key)
-                assert metadata is not None
-                if len(metadata.logits) != metadata.num_sequences:
-                    missing_logits.add(key)
-            if missing_logits:
-                raise ValueError(
-                    f"Generation cache has {len(missing_logits)} semantic samples without KL logits."
-                )
         return generation_cache
 
     generation_cache = GenerationCache(device=cache_device)
@@ -305,7 +292,6 @@ def prepare_generation_cache(
             tokenizer=tokenizer,
             generation_config=generation_config,
             generation_cache=generation_cache,
-            store_logits=store_logits,
             debug_recorder=debug_recorder,
         )
 

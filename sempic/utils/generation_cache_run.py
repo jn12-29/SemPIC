@@ -47,7 +47,6 @@ class GenerationCacheModelConfig(TypedDict):
 class GenerationCacheConfig(TypedDict):
     model: GenerationCacheModelConfig
     data_configs: list[DatasetConfig]
-    store_logits: bool
     gen_batch_size: int
     cache_device: str
     seed: int
@@ -157,9 +156,6 @@ def load_generation_cache_config(config: dict[str, Any]) -> GenerationCacheConfi
         for index, value in enumerate(raw_data_configs)
     ]
 
-    store_logits = config.get("store_logits")
-    if not isinstance(store_logits, bool):
-        raise ValueError("store_logits must be a boolean.")
     cache_device = _require_non_empty_string(
         config.get("cache_device", "cpu"), "cache_device"
     )
@@ -183,7 +179,6 @@ def load_generation_cache_config(config: dict[str, Any]) -> GenerationCacheConfi
             ),
         ),
         data_configs=data_configs,
-        store_logits=store_logits,
         gen_batch_size=_require_integer(
             config.get("gen_batch_size", 1), "gen_batch_size", minimum=1
         ),
@@ -312,7 +307,6 @@ def generate_cache_artifact(config: GenerationCacheConfig) -> Path:
                 model=model,
                 tokenizer=tokenizer,
                 generation_config=effective_generation,
-                store_logits=config["store_logits"],
                 generation_sink=writer.add,
             )
             writer.finalize()

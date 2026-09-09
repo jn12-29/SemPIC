@@ -26,7 +26,6 @@ PROVENANCE = {
     "tokenizer_path": "tokenizer",
     "dtype": "bfloat16",
     "tokenizer": {"pad_token_id": 0, "eos_token_id": 2},
-    "store_logits": True,
 }
 
 
@@ -42,7 +41,6 @@ SHARED = semantic_key("shared")
 def generation(token_id: int, *, text: str | None = None) -> dict:
     return {
         "sequences": [torch.tensor([token_id, 2], dtype=torch.long)],
-        "logits": [torch.arange(10, dtype=torch.bfloat16).reshape(2, 5)],
         "text": [text or f"answer-{token_id}"],
     }
 
@@ -86,7 +84,7 @@ class GenerationCacheStorageTests(unittest.TestCase):
             output = restored.get(FIRST)
             assert output is not None
             self.assertTrue(torch.equal(output["sequences"][0], torch.tensor([3, 2])))
-            self.assertEqual(output["logits"][0].dtype, torch.bfloat16)
+            self.assertNotIn("logits", output)
             self.assertEqual(output["text"], ["answer-3"])
 
     def test_reader_validates_header_without_getting_payload_and_get_is_entry_local(self):
@@ -130,7 +128,7 @@ class GenerationCacheStorageTests(unittest.TestCase):
             assert output is not None
             self.assertEqual(
                 requested,
-                [f"entry.{SECOND}.sequence.0", f"entry.{SECOND}.logit.0"],
+                [f"entry.{SECOND}.sequence.0"],
             )
             self.assertEqual(output["text"], ["answer-4"])
 
@@ -176,7 +174,6 @@ class GenerationCacheStorageTests(unittest.TestCase):
                 "dtype": "bfloat16",
                 "tokenizer": {"pad_token_id": 0, "eos_token_id": 2},
             },
-            "store_logits": True,
         }
         short = generation_cache_provenance({
             **base,
@@ -245,7 +242,7 @@ class GenerationCacheStorageTests(unittest.TestCase):
             with real_safe_open(payload_path, framework="pt", device="cpu") as payload:
                 self.assertEqual(
                     set(payload.keys()),
-                    {f"entry.{FIRST}.sequence.0", f"entry.{FIRST}.logit.0"},
+                    {f"entry.{FIRST}.sequence.0"},
                 )
 
     def test_header_capacity_failure_cleans_private_payload(self):
@@ -296,7 +293,7 @@ class GenerationCacheStorageTests(unittest.TestCase):
                 framework="pt",
                 device="cpu",
             ) as payload:
-                self.assertEqual(len(payload.keys()), 4)
+                self.assertEqual(len(payload.keys()), 2)
 
     def test_context_error_removes_private_payload(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -326,26 +323,6 @@ class GenerationCacheStorageTests(unittest.TestCase):
         generation_cache_module._write_all(output, b"0123456789")
         self.assertEqual(output.data, b"0123456789")
 
-    def test_failed_first_entry_does_not_commit_vocabulary_size(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            writer = StreamingGenerationCacheWriter(
-                temporary,
-                provenance=PROVENANCE,
-                _header_reserve_bytes=64 * 1024,
-            )
-            with patch.object(
-                generation_cache_module,
-                "_write_tensor_bytes",
-                side_effect=OSError("injected write failure"),
-            ):
-                with self.assertRaisesRegex(OSError, "injected write failure"):
-                    writer.add(FIRST, generation(3))
-
-            different_vocab = generation(4)
-            different_vocab["logits"] = [torch.zeros(2, 7, dtype=torch.bfloat16)]
-            writer.add(SECOND, different_vocab)
-            writer.abort()
-
     def test_abort_and_finalize_failure_close_writer(self):
         with tempfile.TemporaryDirectory() as temporary:
             writer = StreamingGenerationCacheWriter(
@@ -373,28 +350,10 @@ class GenerationCacheStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 writer.finalize()
 
-    def test_writer_rejects_semantically_invalid_tensor_types_and_logits_mode(self):
+    def test_writer_rejects_invalid_sequences(self):
         invalid_outputs = (
-            {
-                "sequences": [torch.tensor([1.0])],
-                "logits": [torch.zeros(1, 2)],
-                "text": ["x"],
-            },
-            {
-                "sequences": [torch.tensor([], dtype=torch.long)],
-                "logits": [torch.zeros(0, 2)],
-                "text": ["x"],
-            },
-            {
-                "sequences": [torch.tensor([1])],
-                "logits": [torch.ones(1, 2, dtype=torch.long)],
-                "text": ["x"],
-            },
-            {
-                "sequences": [torch.tensor([1])],
-                "logits": [],
-                "text": ["x"],
-            },
+            {"sequences": [torch.tensor([1.0])], "text": ["x"]},
+            {"sequences": [torch.tensor([], dtype=torch.long)], "text": ["x"]},
         )
         for output in invalid_outputs:
             with self.subTest(output=output), tempfile.TemporaryDirectory() as temporary:
@@ -446,7 +405,6 @@ class GenerationCacheStorageTests(unittest.TestCase):
                 "generation_kwargs": {"max_new_tokens": 8},
                 "tokenizer": {"pad_token_id": 0},
             },
-            "store_logits": True,
             "data_configs": [{"dataset_name": "hotpot_qa"}],
             "output_dir": "/tmp/cache",
         }

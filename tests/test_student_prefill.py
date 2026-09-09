@@ -14,6 +14,7 @@ from sempic.utils.generate import GenerationCache
 from sempic.utils.lora import disable_lora_adapters, set_lora_trainable_only
 from sempic.utils.student_prefill import (
     _dense_train_flex_attention,
+    _online_teacher_logits,
     _interleave_layer_kv,
     _length_aware_context_embeds,
     build_logical_causal_mask,
@@ -411,19 +412,13 @@ class StudentPrefillHelperTests(unittest.TestCase):
 
 
 class StudentPrefillModelTests(unittest.TestCase):
-    def _build_cache(self, prompts, vocab_size, store_logits=False):
+    def _build_cache(self, prompts, vocab_size):
         cache = GenerationCache()
         teacher_sequences = ([12, 13], [14])
         for sample_index, prompt in enumerate(prompts):
             sequence = teacher_sequences[sample_index]
-            logits = (
-                [torch.randn(len(sequence), vocab_size)]
-                if store_logits
-                else []
-            )
             cache.add(f"sample-{sample_index}", {
                 "sequences": [torch.tensor(sequence, dtype=torch.long)],
-                "logits": logits,
                 "text": [""],
             })
         return cache
@@ -433,7 +428,6 @@ class StudentPrefillModelTests(unittest.TestCase):
         cache = GenerationCache()
         cache.add("sample-0", {
             "sequences": [torch.tensor(sequence, dtype=torch.long) for sequence in sequences],
-            "logits": [],
             "text": [""] * len(sequences),
         })
         return cache
@@ -450,27 +444,14 @@ class StudentPrefillModelTests(unittest.TestCase):
             max_position_embeddings=32,
         ))
         cases = (
-            (torch.tensor([1.0]), [], {"type": "ce", "tau": 1.0}, "torch.long"),
-            (torch.tensor([32]), [], {"type": "ce", "tau": 1.0}, "student vocabulary"),
-            (
-                torch.tensor([1]),
-                [torch.zeros(1, 32, dtype=torch.long)],
-                {"type": "kl", "tau": 1.0},
-                "floating-point",
-            ),
-            (
-                torch.tensor([1]),
-                [torch.zeros(2, 32)],
-                {"type": "kl", "tau": 1.0},
-                "sequence length and student vocabulary",
-            ),
+            (torch.tensor([1.0]), {"type": "ce", "tau": 1.0}, "torch.long"),
+            (torch.tensor([32]), {"type": "ce", "tau": 1.0}, "student vocabulary"),
         )
-        for sequence, logits, loss_config, message in cases:
+        for sequence, loss_config, message in cases:
             with self.subTest(message=message):
                 cache = GenerationCache()
                 cache.add("sample-0", {
                     "sequences": [sequence],
-                    "logits": logits,
                     "text": [""],
                 })
                 with self.assertRaisesRegex(ValueError, message):
@@ -586,7 +567,6 @@ class StudentPrefillModelTests(unittest.TestCase):
                 cache = self._build_cache(
                     prompts,
                     cpu_model.config.vocab_size,
-                    store_logits=loss_type == "kl",
                 )
                 config = {"type": loss_type, "tau": 2.0}
 
@@ -677,6 +657,100 @@ class StudentPrefillModelTests(unittest.TestCase):
                     rtol=2e-5,
                 )
 
+    def test_online_kl_matches_full_teacher_forward_and_gradients(self):
+        torch.manual_seed(23)
+        prompts = [
+            make_prompt([1, 0, 3], [("inline", 0, 1), ("context", 1, 2), ("inline", 2, 3)]),
+            make_prompt([4, 5], [("context", 0, 1), ("inline", 1, 2)]),
+        ]
+        samples = [make_sample(prompt, i) for i, prompt in enumerate(prompts)]
+        for model_type, config_type in ((LlamaForCausalLM, LlamaConfig), (Qwen3ForCausalLM, Qwen3Config)):
+            with self.subTest(model=model_type.__name__):
+                model = model_type(config_type(
+                    vocab_size=32, hidden_size=16, intermediate_size=32,
+                    num_hidden_layers=1, num_attention_heads=4,
+                    num_key_value_heads=2, head_dim=4, max_position_embeddings=32,
+                    attention_dropout=0.0,
+                )).eval()
+                model.requires_grad_(False)
+                cache = self._build_cache(prompts, 32)
+                cache.cache["sample-0"]["sequences"].append(torch.tensor([16]))
+                cache.cache["sample-0"]["text"].append("")
+                references = []
+                with torch.no_grad():
+                    for i, prompt in enumerate(prompts):
+                        targets = []
+                        for sequence in cache.cache[f"sample-{i}"]["sequences"]:
+                            ids = torch.cat([prompt.input_ids, sequence]).unsqueeze(0)
+                            full = model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False).logits
+                            start = prompt.input_ids.numel() - 1
+                            targets.append(full[0, start:start + sequence.numel()].clone())
+                        references.append(targets)
+                wrapper = PacketWrapper(1, 1, 16, device=torch.device("cpu"))
+                reference_wrapper = copy.deepcopy(wrapper)
+                with (
+                    mock.patch.object(model, "generate", side_effect=AssertionError("Unexpected decode")),
+                    mock.patch("sempic.utils.student_prefill._online_teacher_logits", wraps=_online_teacher_logits) as score,
+                ):
+                    loss, count, _ = batched_student_loss(
+                        samples, model, cache, {"type": "kl", "tau": 2.0},
+                        False, None, wrapper,
+                    )
+                    self.assertEqual(score.call_count, len(samples))
+                loss.backward()
+                with mock.patch("sempic.utils.student_prefill._online_teacher_logits", side_effect=references):
+                    reference_loss, reference_count, _ = batched_student_loss(
+                        samples, model, cache, {"type": "kl", "tau": 2.0},
+                        False, None, reference_wrapper,
+                    )
+                reference_loss.backward()
+                self.assertEqual(count, reference_count)
+                torch.testing.assert_close(loss, reference_loss, atol=2e-6, rtol=1e-4)
+                for actual, expected in zip((wrapper.header, wrapper.trailer), (reference_wrapper.header, reference_wrapper.trailer), strict=True):
+                    torch.testing.assert_close(actual.grad, expected.grad, atol=2e-6, rtol=1e-4)
+                self.assertTrue(all("logits" not in entry for entry in cache.cache.values()))
+                with mock.patch("sempic.utils.student_prefill._online_teacher_logits") as score:
+                    batched_student_loss(samples, model, cache, {"type": "ce"}, False, None, wrapper)
+                    score.assert_not_called()
+
+    def test_online_teacher_disables_lora_and_restores_state_even_on_error(self):
+        torch.manual_seed(24)
+        model = get_peft_model(LlamaForCausalLM(LlamaConfig(
+            vocab_size=32, hidden_size=16, intermediate_size=32,
+            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+            attention_dropout=0.5,
+        )), LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM"))
+        with torch.no_grad():
+            for name, parameter in model.named_parameters():
+                if "lora_B" in name:
+                    parameter.fill_(0.2)
+        model.train()
+        model.get_base_model().model.layers[0].mlp.eval()
+        prompt = make_prompt([1, 2], [("inline", 0, 2)])
+        sequences = [torch.tensor([3, 4])]
+        states = [module.training for module in model.modules()]
+        grads = [p.requires_grad for p in model.parameters()]
+        adapter_states = [m.disable_adapters for m in model.modules() if hasattr(m, "_disable_adapters")]
+        def check_forward(module, args, kwargs):
+            self.assertFalse(torch.is_grad_enabled())
+            self.assertTrue(all(not m.training for m in model.modules()))
+            self.assertTrue(all(m.disable_adapters for m in model.modules() if hasattr(m, "_disable_adapters")))
+            self.assertFalse(kwargs["use_cache"])
+        handle = model.register_forward_pre_hook(check_forward, with_kwargs=True)
+        try:
+            first = _online_teacher_logits(model, prompt, sequences, lora_enabled=True)
+            second = _online_teacher_logits(model, prompt, sequences, lora_enabled=True)
+        finally:
+            handle.remove()
+        torch.testing.assert_close(first[0], second[0], atol=0, rtol=0)
+        self.assertFalse(first[0].requires_grad)
+        with mock.patch("sempic.utils.student_prefill.get_teacher_logits", side_effect=RuntimeError("teacher failed")):
+            with self.assertRaisesRegex(RuntimeError, "teacher failed"):
+                _online_teacher_logits(model, prompt, sequences, lora_enabled=True)
+        self.assertEqual(states, [m.training for m in model.modules()])
+        self.assertEqual(grads, [p.requires_grad for p in model.parameters()])
+        self.assertEqual(adapter_states, [m.disable_adapters for m in model.modules() if hasattr(m, "_disable_adapters")])
+
     def test_tiny_llama_kl_is_summed_across_samples(self):
         torch.manual_seed(0)
         prompts = [
@@ -696,7 +770,7 @@ class StudentPrefillModelTests(unittest.TestCase):
         for parameter in model.parameters():
             parameter.requires_grad = False
         model.eval()
-        cache = self._build_cache(prompts, model.config.vocab_size, store_logits=True)
+        cache = self._build_cache(prompts, model.config.vocab_size)
 
         loss, token_count, sample_losses = batched_student_loss(
             [make_sample(prompt, index) for index, prompt in enumerate(prompts)],
@@ -810,7 +884,7 @@ class StudentPrefillModelTests(unittest.TestCase):
             [make_sample(prompt)],
             model,
             cache,
-            {"type": "ce", "tau": 1.0},
+            {"type": "kl", "tau": 1.0},
             lora_enabled=True,
             lora_adapter_name="lora_kv_cache",
             packet_wrapper=None,

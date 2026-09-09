@@ -20,7 +20,6 @@ TokenizerType: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 class GenerationOutput(TypedDict):
     sequences: list[torch.Tensor] # (num_seq) [generated_seq_len]
-    logits: list[torch.Tensor]    # (num_seq) [generated_seq_len, vocab_size]
     text: list[str]               # (num_seq) strings
 
 
@@ -46,14 +45,15 @@ class GenerationCache:
         return generation_cache_key(payload)
 
 
-    def get(self, key: str, device: torch.device|None=None) -> GenerationOutput | None:
+    def get(
+        self, key: str, device: torch.device | str | None = None,
+    ) -> GenerationOutput | None:
         generation = self.cache.get(key, None)
         if generation is None:
             return None
         if device is not None and self.device != device:
             generation = GenerationOutput(
                 sequences=[seq.to(device) for seq in generation["sequences"]],
-                logits=[logit.to(device) for logit in generation["logits"]],
                 text=generation["text"],
             )
         return generation
@@ -63,7 +63,6 @@ class GenerationCache:
         """ Add a generation output to the cache. """
         if self.device is not None:
             generation["sequences"] = [seq.to(self.device) for seq in generation["sequences"]]
-            generation["logits"] = [logit.to(self.device) for logit in generation["logits"]]
         self.cache[key] = generation
 
 
@@ -177,7 +176,6 @@ def get_generation(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     generation_config: GenerationConfig | None = None,
-    output_logits: bool = True,
 ) -> GenerationOutput:
     """Generate from canonical prompt IDs and an explicit validity mask."""
     assert isinstance(tokenizer.pad_token_id, int)
@@ -190,8 +188,8 @@ def get_generation(
     attention_mask = attention_mask.to(model_device)
     effective_config = resolve_generation_config(model, generation_config)
     effective_config.return_dict_in_generate = True
-    use_generation_logits = output_logits and effective_config.num_beams == 1
-    effective_config.output_logits = use_generation_logits
+    effective_config.output_logits = False
+    effective_config.output_scores = False
 
     with torch.inference_mode():
         generation_output = model.generate(
@@ -210,7 +208,6 @@ def get_generation(
 
     generation = GenerationOutput(
         sequences=[],
-        logits=[],
         text=[]
     )
 
@@ -234,33 +231,6 @@ def get_generation(
         assert isinstance(text, str)
         generation["sequences"].append(seq)
         generation["text"].append(text)
-    if use_generation_logits:
-        if generation_output.logits is None:
-            raise RuntimeError("Teacher generation did not return requested step logits.")
-        step_logits = generation_output.logits
-        if len(step_logits) < max(sequence.numel() for sequence in generation["sequences"]):
-            raise RuntimeError("Teacher generation returned fewer logits than generated tokens.")
-        teacher_dtype = next(model.parameters()).dtype
-        generation["logits"] = [
-            torch.stack([
-                step_logits[step][row]
-                for step in range(sequence.numel())
-            ]).to(dtype=teacher_dtype)
-            for row, sequence in enumerate(generation["sequences"])
-        ]
-    elif output_logits:
-        generation["logits"] = get_teacher_logits(
-            model,
-            prompt_input_ids=input_ids.repeat_interleave(
-                effective_config.num_return_sequences,
-                dim=0,
-            ),
-            prompt_attention_mask=attention_mask.repeat_interleave(
-                effective_config.num_return_sequences,
-                dim=0,
-            ),
-            sequences=generation["sequences"],
-        )
     return generation
 
 

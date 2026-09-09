@@ -11,7 +11,7 @@
 
 The command refuses an existing output path. Generated tensor payloads are appended once directly to a private temporary `cache.safetensors`. Finalization backfills its reserved safetensors header and writes `manifest.json` without copying or rewriting the tensor payload. The completed three-file private directory is then published with one rename. There are no per-entry chunk files and no append, resume, merge, or overwrite mode. If the reserved header capacity is insufficient, generation fails and removes the private temporary artifact without publishing `output_dir`.
 
-The runtime format is safetensors-only.
+The runtime format is safetensors-only (format version 3). Artifacts contain answer token sequences and decoded text; generation never collects or stores logits or scores. KL training computes teacher logits online per request.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python run_generation_cache.py \
@@ -24,7 +24,6 @@ CUDA_VISIBLE_DEVICES=0 uv run python run_generation_cache.py \
 | --- | --- | --- | --- |
 | `model` | object | yes | Teacher model and decoding configuration. |
 | `data_configs` | list[object] | yes | Non-empty dataset list using the same fields as training. |
-| `store_logits` | bool | yes | Store logits for KL training when `true`; store sequences only when `false`. |
 | `gen_batch_size` | int | no | Teacher generation batch size. Defaults to `1`. |
 | `cache_device` | str | no | Streaming cache device. It must be `"cpu"` and defaults to `"cpu"`. Only the current generated entry is staged in CPU memory before its tensor bytes are appended; entry metadata is retained until finalization. |
 | `seed` | int | no | Python and PyTorch seed. Defaults to `42`. |
@@ -46,4 +45,4 @@ Point training at the generated artifact directory:
 "cache_path": "./generation_cache/artifacts/qwen_3_8b_teacher/biography_greedy_kl"
 ```
 
-Training treats the artifact as immutable. It reads `manifest.json` for coverage and tensor-shape checks, then maps only the requested entry from `cache.safetensors`. It does not preload the payload into CPU memory. The cache teacher, tokenizer path and current tokenizer state (`padding_side`, pad ID, and EOS ID), and dtype must match training. Multiple compatible artifact directories can be listed for mixture training; their logit-storage mode must also match, while per-domain generation lengths may differ. Conflicting duplicate semantic keys fail before training.
+Training treats the artifact as immutable. It reads `manifest.json` for coverage and tensor-shape checks, then maps only the requested entry from `cache.safetensors`. It does not preload the payload into CPU memory. The cache teacher, tokenizer path and current tokenizer state (`padding_side`, pad ID, and EOS ID), and dtype must match training. Multiple compatible artifact directories can be listed for mixture training; per-domain generation lengths may differ. Conflicting duplicate semantic keys fail before training.
