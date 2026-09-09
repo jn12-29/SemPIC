@@ -17,7 +17,7 @@
 | `output_dir` | str | yes | Method root. Use `train_outputs/<model>/<dataset>/<method>`. |
 | `run_suffix` | str \| null | no | Optional readable suffix for a new timestamp run. CLI `--run-suffix` takes precedence. |
 | `kv_gradient_checkpointing` | bool | no | Recomputes document KV forwards during backward to reduce activation memory while preserving `use_cache=True`. Defaults to `true`. |
-| `seed` | int | no | Shuffle seed. Defaults to `42`. |
+| `seed` | int | no | Training RNG seed, applied before model/adapter initialization and used for sample shuffling. Defaults to `42`. |
 | `train` | dict | no | Training target selection. |
 | `loss` | dict | no | Shared student loss configuration. |
 | `lora` | dict | yes | LoRA component configuration. |

@@ -12,7 +12,7 @@ from pprint import pformat
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, set_seed
 
 from sempic.dataset import get_ret_eval_generator
 from sempic.model import SupportedModel
@@ -401,6 +401,7 @@ def train_one_config(
         pformat(_format_log_floats(train_config)),
     )
 
+    set_seed(train_config["seed"])
     tokenizer = load_tokenizer(train_config, train_cache)
     model = load_model(train_config, train_cache)
     packet_wrapper = load_packet_wrapper_for_train(train_config, model)
